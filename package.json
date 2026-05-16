@@ -10,8 +10,8 @@
     "publish:release": "mimusic-plugin publish"
   },
   "devDependencies": {
-    "@mimusic/plugin-builder": "^0.6.4",
-    "@mimusic/plugin-sdk": "^0.6.4",
+    "@mimusic/plugin-builder": "^0.6.5",
+    "@mimusic/plugin-sdk": "^0.6.5",
     "typescript": "^5.9.3"
   }
 }
