@@ -37,7 +37,7 @@ export function registerAuthHandlers(
 ): void {
 
   // POST /auth/login - 密码登录
-  router.post('/auth/login', (async (req: HTTPRequest) => {
+  router.post('/auth/login', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { account_id, username, password } = body;
@@ -50,10 +50,10 @@ export function registerAuthHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /auth/captcha - 提交图形验证码
-  router.post('/auth/captcha', (async (req: HTTPRequest) => {
+  router.post('/auth/captcha', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { account_id, captcha } = body;
@@ -65,10 +65,10 @@ export function registerAuthHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /auth/verify - 提交短信/邮箱验证码
-  router.post('/auth/verify', (async (req: HTTPRequest) => {
+  router.post('/auth/verify', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { account_id, code } = body;
@@ -80,10 +80,10 @@ export function registerAuthHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /auth/token - 手动设置Token
-  router.post('/auth/token', (async (req: HTTPRequest) => {
+  router.post('/auth/token', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { account_id, user_id, pass_token } = body;
@@ -96,10 +96,10 @@ export function registerAuthHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // GET /auth/status - 获取认证状态
-  router.get('/auth/status', (async (req: HTTPRequest) => {
+  router.get('/auth/status', async (req: HTTPRequest) => {
     try {
       const query = parseQuery(req.query);
       const accountId = query.account_id;
@@ -112,10 +112,10 @@ export function registerAuthHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /auth/qrcode - 启动扫码登录
-  router.post('/auth/qrcode', (async (req: HTTPRequest) => {
+  router.post('/auth/qrcode', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const accountId = body.account_id || ('qr_' + Date.now());
@@ -132,10 +132,10 @@ export function registerAuthHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /auth/qrcode/poll - 轮询扫码状态
-  router.post('/auth/qrcode/poll', (async (req: HTTPRequest) => {
+  router.post('/auth/qrcode/poll', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { account_id } = body;
@@ -159,10 +159,10 @@ export function registerAuthHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /auth/relogin - 强制重新登录
-  router.post('/auth/relogin', (async (req: HTTPRequest) => {
+  router.post('/auth/relogin', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { account_id } = body;
@@ -174,5 +174,5 @@ export function registerAuthHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 }

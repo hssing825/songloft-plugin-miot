@@ -33,7 +33,7 @@ export function registerAccountHandlers(
 ): void {
 
   // POST /accounts - 创建账号
-  router.post('/accounts', (async (req: HTTPRequest) => {
+  router.post('/accounts', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { account, auth_type } = body;
@@ -45,10 +45,10 @@ export function registerAccountHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // GET /accounts - 获取账号列表（敏感信息脱敏）
-  router.get('/accounts', (async (req: HTTPRequest) => {
+  router.get('/accounts', async (req: HTTPRequest) => {
     try {
       const accounts = await accountManager.getAccounts();
       const safeAccounts = accounts.map(a => ({
@@ -65,10 +65,10 @@ export function registerAccountHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // GET /account - 获取单个账号
-  router.get('/account', (async (req: HTTPRequest) => {
+  router.get('/account', async (req: HTTPRequest) => {
     try {
       const query = parseQuery(req.query);
       const accountId = query.account_id;
@@ -93,10 +93,10 @@ export function registerAccountHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // DELETE /account - 删除账号
-  router.delete('/account', (async (req: HTTPRequest) => {
+  router.delete('/account', async (req: HTTPRequest) => {
     try {
       const query = parseQuery(req.query);
       const accountId = query.account_id;
@@ -108,5 +108,5 @@ export function registerAccountHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 }

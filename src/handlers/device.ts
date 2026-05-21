@@ -34,7 +34,7 @@ export function registerDeviceHandlers(
 ): void {
 
   // GET /mina/devices - 获取设备列表（按账号分组）
-  router.get('/mina/devices', (async (req: HTTPRequest) => {
+  router.get('/mina/devices', async (req: HTTPRequest) => {
     try {
       const query = parseQuery(req.query);
       const accountId = query.account_id;
@@ -64,10 +64,10 @@ export function registerDeviceHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /mina/volume - 设置音量
-  router.post('/mina/volume', (async (req: HTTPRequest) => {
+  router.post('/mina/volume', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { account_id, device_id, volume } = body;
@@ -88,10 +88,10 @@ export function registerDeviceHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /mina/play-url - 播放URL
-  router.post('/mina/play-url', (async (req: HTTPRequest) => {
+  router.post('/mina/play-url', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { account_id, device_id, url } = body;
@@ -109,10 +109,10 @@ export function registerDeviceHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /mina/device/managed - 更新设备管理状态
-  router.post('/mina/device/managed', (async (req: HTTPRequest) => {
+  router.post('/mina/device/managed', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { account_id, device_id, managed } = body;
@@ -133,10 +133,10 @@ export function registerDeviceHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /mina/last_selection - 记录最后选中设备
-  router.post('/mina/last_selection', (async (req: HTTPRequest) => {
+  router.post('/mina/last_selection', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { account_id, device_id } = body;
@@ -154,5 +154,5 @@ export function registerDeviceHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 }

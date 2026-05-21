@@ -303,7 +303,7 @@ export class PlaylistManager {
     try {
       // 使用 mimusic.playlists.getSongs 桥接调用（与 Go WASM 版本的 hostFunctions.CallRouter 等价）
       // 这样不需要 hostBaseUrl 和 pluginToken，直接通过内部桥接访问数据库
-      const songs = await mimusic.playlists.getSongs(playlistId, { limit: 100000 } as any);
+      const songs = await mimusic.playlists.getSongs(playlistId, { limit: 100000 });
       if (!songs || !Array.isArray(songs)) {
         mimusic.log.error('[PlaylistManager] Bridge returned invalid songs data for playlist: ' + playlistId);
         return false;
@@ -626,7 +626,7 @@ export class PlaylistManagerMap {
       // 使用 mimusic.playlists.getSongs 桥接调用加载歌单歌曲
       let songs: Song[] = [];
       try {
-        const result = await mimusic.playlists.getSongs(devCfg.playlist_id, { limit: 100000 } as any);
+        const result = await mimusic.playlists.getSongs(devCfg.playlist_id, { limit: 100000 });
         if (result && Array.isArray(result)) {
           songs = result as any;
         }

@@ -106,7 +106,7 @@ export function registerScheduleHandlers(
 ): void {
 
   // GET /schedules - 获取定时任务列表
-  router.get('/schedules', (async (req: HTTPRequest) => {
+  router.get('/schedules', async (req: HTTPRequest) => {
     try {
       const tasks = await configManager.getScheduledTasks();
       const config = await configManager.getConfig();
@@ -117,10 +117,10 @@ export function registerScheduleHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /schedules - 添加定时任务
-  router.post('/schedules', (async (req: HTTPRequest) => {
+  router.post('/schedules', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { name, action, schedule, target, params, enabled } = body;
@@ -169,10 +169,10 @@ export function registerScheduleHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /schedules/update - 更新定时任务
-  router.post('/schedules/update', (async (req: HTTPRequest) => {
+  router.post('/schedules/update', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { id, name, action, schedule, target, params, enabled } = body;
@@ -216,10 +216,10 @@ export function registerScheduleHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // DELETE /schedules - 删除定时任务
-  router.delete('/schedules', (async (req: HTTPRequest) => {
+  router.delete('/schedules', async (req: HTTPRequest) => {
     try {
       const query = parseQuery(req.query);
       const id = query.id;
@@ -231,10 +231,10 @@ export function registerScheduleHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /schedules/toggle - 切换定时任务启用状态
-  router.post('/schedules/toggle', (async (req: HTTPRequest) => {
+  router.post('/schedules/toggle', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { id, enabled } = body;
@@ -246,10 +246,10 @@ export function registerScheduleHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // GET /schedules/logs - 获取执行日志
-  router.get('/schedules/logs', (async (req: HTTPRequest) => {
+  router.get('/schedules/logs', async (req: HTTPRequest) => {
     try {
       const query = parseQuery(req.query);
       const limit = query.limit ? Number(query.limit) : 50;
@@ -258,5 +258,5 @@ export function registerScheduleHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 }

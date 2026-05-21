@@ -29,7 +29,7 @@ export function registerVoiceCommandHandlers(
 ): void {
 
   // GET /voice-commands - 获取语音口令配置
-  router.get('/voice-commands', (async (req: HTTPRequest) => {
+  router.get('/voice-commands', async (req: HTTPRequest) => {
     try {
       const commands = await configManager.getVoiceCommands();
       const config = await configManager.getConfig();
@@ -40,10 +40,10 @@ export function registerVoiceCommandHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /voice-commands - 设置语音口令配置
-  router.post('/voice-commands', (async (req: HTTPRequest) => {
+  router.post('/voice-commands', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { commands } = body;
@@ -57,5 +57,5 @@ export function registerVoiceCommandHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 }

@@ -34,7 +34,7 @@ export function registerConversationHandlers(
 ): void {
 
   // GET /conversation/messages - 获取对话记录
-  router.get('/conversation/messages', (async (req: HTTPRequest) => {
+  router.get('/conversation/messages', async (req: HTTPRequest) => {
     try {
       const query = parseQuery(req.query);
       const limit = query.limit ? Number(query.limit) : 50;
@@ -45,20 +45,20 @@ export function registerConversationHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // GET /conversation/status - 获取监听状态
-  router.get('/conversation/status', (async (req: HTTPRequest) => {
+  router.get('/conversation/status', async (req: HTTPRequest) => {
     try {
       const status = await conversationMonitor.getStatus();
       return jsonResponse({ success: true, data: status });
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /conversation/webhooks - 注册Webhook
-  router.post('/conversation/webhooks', (async (req: HTTPRequest) => {
+  router.post('/conversation/webhooks', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { url, name } = body;
@@ -77,20 +77,20 @@ export function registerConversationHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // GET /conversation/webhooks - 获取Webhook列表
-  router.get('/conversation/webhooks', (async (req: HTTPRequest) => {
+  router.get('/conversation/webhooks', async (req: HTTPRequest) => {
     try {
       const webhooks = await configManager.getWebhooks();
       return jsonResponse({ success: true, data: webhooks, count: webhooks.length });
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // DELETE /conversation/webhooks - 删除Webhook
-  router.delete('/conversation/webhooks', (async (req: HTTPRequest) => {
+  router.delete('/conversation/webhooks', async (req: HTTPRequest) => {
     try {
       const query = parseQuery(req.query);
       const webhookId = query.id;
@@ -102,5 +102,5 @@ export function registerConversationHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 }

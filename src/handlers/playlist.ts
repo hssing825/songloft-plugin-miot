@@ -55,7 +55,7 @@ export function registerPlaylistHandlers(
 ): void {
 
   // GET /playlists - 获取歌单列表
-  router.get('/playlists', (async (req: HTTPRequest) => {
+  router.get('/playlists', async (req: HTTPRequest) => {
     try {
       const config = await configManager.getConfig();
       if (!config.server_host) {
@@ -71,24 +71,24 @@ export function registerPlaylistHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // GET /playlists/:id/songs - 获取歌单歌曲
-  router.get('/playlists/:id/songs', (async (req: HTTPRequest, params: Record<string, string>) => {
+  router.get('/playlists/:id/songs', async (req: HTTPRequest, params: Record<string, string>) => {
     try {
       const playlistId = Number(params.id);
       if (!playlistId || isNaN(playlistId)) {
         return jsonResponse({ success: false, error: 'invalid playlist id' });
       }
-      const songs = await mimusic.playlists.getSongs(playlistId, { limit: 100000 } as any);
+      const songs = await mimusic.playlists.getSongs(playlistId, { limit: 100000 });
       return jsonResponse({ success: true, data: songs });
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /player/play - 播放歌单
-  router.post('/player/play', (async (req: HTTPRequest) => {
+  router.post('/player/play', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const { account_id, device_id, playlist_id, start_index, play_mode } = body;
@@ -131,10 +131,10 @@ export function registerPlaylistHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /player/stop - 停止播放
-  router.post('/player/stop', (async (req: HTTPRequest) => {
+  router.post('/player/stop', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const query = parseQuery(req.query);
@@ -154,10 +154,10 @@ export function registerPlaylistHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /player/previous - 上一首
-  router.post('/player/previous', (async (req: HTTPRequest) => {
+  router.post('/player/previous', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const query = parseQuery(req.query);
@@ -181,10 +181,10 @@ export function registerPlaylistHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /player/next - 下一首
-  router.post('/player/next', (async (req: HTTPRequest) => {
+  router.post('/player/next', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const query = parseQuery(req.query);
@@ -208,10 +208,10 @@ export function registerPlaylistHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /player/mode - 设置播放模式
-  router.post('/player/mode', (async (req: HTTPRequest) => {
+  router.post('/player/mode', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const query = parseQuery(req.query);
@@ -236,10 +236,10 @@ export function registerPlaylistHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // GET /player/status - 获取播放状态
-  router.get('/player/status', (async (req: HTTPRequest) => {
+  router.get('/player/status', async (req: HTTPRequest) => {
     try {
       const query = parseQuery(req.query);
       const { account_id, device_id } = query;
@@ -254,5 +254,5 @@ export function registerPlaylistHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 }

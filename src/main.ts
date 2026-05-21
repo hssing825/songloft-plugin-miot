@@ -122,10 +122,10 @@ async function onDeinit(): Promise<void> {
 }
 
 async function onHTTPRequest(req: HTTPRequest): Promise<HTTPResponse> {
-  return router.handle(req);
+  return await router.handle(req);
 }
 
-// 暴露为全局（QuickJS 需要显式声明）
-globalThis.onInit = onInit as any;
-globalThis.onDeinit = onDeinit as any;
-globalThis.onHTTPRequest = onHTTPRequest as any;
+// 暴露为全局（QuickJS 需要显式声明）。SDK 0.8+ 已正式支持 async 签名。
+globalThis.onInit = onInit;
+globalThis.onDeinit = onDeinit;
+globalThis.onHTTPRequest = onHTTPRequest;

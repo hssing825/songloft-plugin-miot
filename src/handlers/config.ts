@@ -58,7 +58,7 @@ export function registerConfigHandlers(
 ): void {
 
   // GET /config - 获取配置
-  router.get('/config', (async (req: HTTPRequest) => {
+  router.get('/config', async (req: HTTPRequest) => {
     try {
       const config = await configManager.getConfig();
       return jsonResponse({
@@ -75,10 +75,10 @@ export function registerConfigHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) }, 500);
     }
-  }) as any);
+  });
 
   // POST /config - 更新配置
-  router.post('/config', (async (req: HTTPRequest) => {
+  router.post('/config', async (req: HTTPRequest) => {
     try {
       const body = parseBody(req);
       const config = await configManager.getConfig();
@@ -143,5 +143,5 @@ export function registerConfigHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) }, 500);
     }
-  }) as any);
+  });
 }

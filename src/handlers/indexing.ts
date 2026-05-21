@@ -16,17 +16,17 @@ export function registerIndexingHandlers(
 ): void {
 
   // GET /indexing/status - 获取索引状态
-  router.get('/indexing/status', (async (req: HTTPRequest) => {
+  router.get('/indexing/status', async (req: HTTPRequest) => {
     try {
       const status = indexingManager.getStatus();
       return jsonResponse({ success: true, data: status });
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 
   // POST /indexing/refresh - 刷新索引
-  router.post('/indexing/refresh', (async (req: HTTPRequest) => {
+  router.post('/indexing/refresh', async (req: HTTPRequest) => {
     try {
       // 后台异步刷新，立即返回响应
       indexingManager.refresh().catch(e => {
@@ -36,5 +36,5 @@ export function registerIndexingHandlers(
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
-  }) as any);
+  });
 }

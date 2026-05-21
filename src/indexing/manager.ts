@@ -416,7 +416,7 @@ export class IndexingManager {
     // 2. 遍历歌单，按需加载歌曲列表查找位置
     for (const pl of this.playlists) {
       try {
-        const plSongs = (await mimusic.playlists.getSongs(pl.id, { limit: 100000 } as any)) ?? [];
+        const plSongs = (await mimusic.playlists.getSongs(pl.id, { limit: 100000 })) ?? [];
         for (let idx = 0; idx < plSongs.length; idx++) {
           if (matchedSongIds.has(plSongs[idx].id)) {
             return {
