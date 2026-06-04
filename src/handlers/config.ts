@@ -91,9 +91,12 @@ export function registerConfigHandlers(
 
       // 更新 server_host
       if (body.server_host !== undefined) {
-        config.server_host = body.server_host;
-        // 同步更新宿主 API 基础 URL，确保 PlaylistManager/URLBuilder 能读取到最新值
-        setHostBaseUrl(body.server_host || '');
+        let serverHost = typeof body.server_host === 'string' ? body.server_host.trim() : '';
+        if (serverHost && !serverHost.startsWith('http://') && !serverHost.startsWith('https://')) {
+          serverHost = 'http://' + serverHost;
+        }
+        config.server_host = serverHost;
+        setHostBaseUrl(serverHost);
       }
 
       // 更新 timezone

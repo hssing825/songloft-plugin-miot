@@ -109,7 +109,14 @@ export function loadConfig() {
  */
 export function saveConfig() {
     const serverHostInput = document.getElementById('serverHost');
-    const serverHost = serverHostInput ? serverHostInput.value.trim() : '';
+    let serverHost = serverHostInput ? serverHostInput.value.trim() : '';
+
+    if (serverHost && !serverHost.startsWith('http://') && !serverHost.startsWith('https://')) {
+        serverHost = window.location.protocol + '//' + serverHost;
+        if (serverHostInput) {
+            serverHostInput.value = serverHost;
+        }
+    }
 
     apiPost('/config', { server_host: serverHost })
         .then(data => {
