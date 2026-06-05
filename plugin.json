@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/songloft-org/plugin-toolchain/main/schemas/plugin.schema.json",
-  "name": "MIoT 智能音箱",
+  "name": "智能音箱",
   "version": "2026.6.5",
   "description": "通过 MIoT 协议把歌曲投放到智能音箱设备",
   "author": "Songloft Team",
