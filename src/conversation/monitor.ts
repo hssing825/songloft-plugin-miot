@@ -98,11 +98,13 @@ export class ConversationMonitor {
 
     // 刷新设备列表（异步，不等待）
     this.refreshDevices().then(() => {
-      // 标记所有设备为运行中
+      // 标记所有设备为运行中，并重置时间戳防止重放旧消息
+      const now = Date.now();
       for (const dm of this.devices.values()) {
         dm.isRunning = true;
+        dm.lastTimestampMs = now;
       }
-      songloft.log.info(`[ConversationMonitor] Started, devices=${this.devices.size} callbacks=${this.callbacks.size}`);
+      songloft.log.info(`[ConversationMonitor] Started, devices=${this.devices.size} callbacks=${this.callbacks.size} timestampReset=${now}`);
     }).catch(e => {
       songloft.log.error('[ConversationMonitor] refreshDevices error: ' + String(e));
     });

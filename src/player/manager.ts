@@ -259,6 +259,36 @@ export class PlaylistManager {
   }
 
   /**
+   * 恢复播放（使用 play 接口继续，不重发 URL）
+   * 用于语音命令（如调音量）中断 URL 播放后恢复
+   * 同时重置切歌定时器以补偿暂停时间
+   */
+  async resumePlayback(): Promise<boolean> {
+    if (this.state !== 'playing' || this.songs.length === 0) {
+      return false;
+    }
+
+    const ok = await this.minaService.resumePlay(this.accountId, this.deviceId);
+    if (!ok) {
+      songloft.log.warn('[PlaylistManager] resumePlay failed');
+      return false;
+    }
+
+    const song = this.getCurrentSong();
+    if (song && song.duration > 0 && this.playStartTimeMs > 0) {
+      this.stopCheckTimer();
+      const elapsedSec = (Date.now() - this.playStartTimeMs) / 1000;
+      const remaining = song.duration - elapsedSec;
+      if (remaining > 0) {
+        this.startCheckTimer(remaining);
+        songloft.log.info(`[PlaylistManager] Timer reset after resume: remaining=${remaining.toFixed(1)}s`);
+      }
+    }
+
+    return true;
+  }
+
+  /**
    * 获取当前播放位置（秒）
    */
   getPosition(): number {

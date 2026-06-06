@@ -193,23 +193,40 @@ export class VoiceEngine {
       }))
       .sort((a, b) => a.priority - b.priority);
 
-    // 按优先级遍历，包含匹配
+    // 按优先级分组遍历，同优先级内取最长关键词匹配
+    // 避免短关键词（如"音量"）窃取长关键词（如"音量大一点"）的匹配
+    let currentPriority = -1;
+    let bestMatch: MatchResult | null = null;
+    let bestKeywordLen = 0;
+
     for (const item of enabledCommands) {
+      if (item.priority !== currentPriority) {
+        if (bestMatch) {
+          return bestMatch;
+        }
+        currentPriority = item.priority;
+        bestMatch = null;
+        bestKeywordLen = 0;
+      }
+
       for (const keyword of item.cmd.keywords) {
         const idx = query.indexOf(keyword);
         if (idx >= 0) {
-          // 提取 keyword 后面的文字作为 argument
-          const argument = query.slice(idx + keyword.length).trim();
-          return {
-            command: item.cmd,
-            keyword,
-            argument,
-          };
+          const kwLen = Array.from(keyword).length;
+          if (kwLen > bestKeywordLen) {
+            bestKeywordLen = kwLen;
+            const argument = query.slice(idx + keyword.length).trim();
+            bestMatch = {
+              command: item.cmd,
+              keyword,
+              argument,
+            };
+          }
         }
       }
     }
 
-    return null;
+    return bestMatch;
   }
 
   // ===== 私有方法 - 口令执行 =====
@@ -218,6 +235,9 @@ export class VoiceEngine {
    * 执行匹配到的口令
    */
   private async executeCommand(result: MatchResult, accountId: string, deviceId: string): Promise<void> {
+    const pm = this.playlistManagerMap.get(accountId, deviceId);
+    const wasPlaying = pm?.isPlaying() ?? false;
+
     switch (result.command.type) {
       case 'play_playlist':
         await this.executePlayPlaylist(result.argument, accountId, deviceId);
@@ -243,6 +263,8 @@ export class VoiceEngine {
       default:
         songloft.log.warn(`[VoiceEngine] Unknown command type: ${result.command.type}`);
     }
+
+    this.tryResumePlayback(result.command.type, wasPlaying, pm);
   }
 
   /**
@@ -250,11 +272,13 @@ export class VoiceEngine {
    */
   private async executeAIResult(result: AIAnalysisResult, accountId: string, deviceId: string): Promise<void> {
     songloft.log.info(`[VoiceEngine] [AI] Executing action=${result.action} params=${JSON.stringify(result.params)}`);
+    const pm = this.playlistManagerMap.get(accountId, deviceId);
+    const wasPlaying = pm?.isPlaying() ?? false;
+
     switch (result.action) {
       case 'play_song': {
         const name = result.params.name || '';
         const artist = result.params.artist || '';
-        // 用 name + artist 组合作为搜索关键词
         const searchTerm = name || artist;
         if (!searchTerm) {
           songloft.log.warn('[VoiceEngine] [AI] play_song: no name or artist to play');
@@ -299,6 +323,30 @@ export class VoiceEngine {
       default:
         songloft.log.warn(`[VoiceEngine] [AI] Unknown action: ${result.action}`);
     }
+
+    this.tryResumePlayback(result.action, wasPlaying, pm);
+  }
+
+  /**
+   * 非播放类命令执行后，尝试恢复被小爱语音唤醒中断的 URL 播放
+   */
+  private tryResumePlayback(commandType: string, wasPlaying: boolean, pm: import('../player/manager').PlaylistManager | null): void {
+    const isNonPlaybackCommand = commandType === 'set_volume' || commandType === 'set_play_mode';
+    if (!isNonPlaybackCommand || !wasPlaying || !pm) return;
+
+    songloft.log.info('[VoiceEngine] Non-playback command while playing, will resume after delay');
+    setTimeout(async () => {
+      try {
+        const ok = await pm.resumePlayback();
+        if (ok) {
+          songloft.log.info('[VoiceEngine] Playback resumed after voice command');
+        } else {
+          songloft.log.warn('[VoiceEngine] Failed to resume playback');
+        }
+      } catch (e) {
+        songloft.log.error('[VoiceEngine] Error resuming playback: ' + String(e));
+      }
+    }, 2000);
   }
 
   /**
@@ -307,6 +355,17 @@ export class VoiceEngine {
    */
   private async executePlayPlaylist(playlistName: string, accountId: string, deviceId: string): Promise<void> {
     const pm = await this.playlistManagerMap.getOrCreate(accountId, deviceId);
+
+    // 检查索引是否就绪，未就绪则尝试按需刷新
+    if (!this.indexingManager.isIndexReady()) {
+      songloft.log.warn('[VoiceEngine] Playlist index not ready, attempting on-demand refresh');
+      const result = await this.indexingManager.refresh();
+      if (!result.success || !this.indexingManager.isIndexReady()) {
+        songloft.log.warn('[VoiceEngine] Playlist index refresh failed, skip play playlist');
+        return;
+      }
+      songloft.log.info(`[VoiceEngine] Playlist index refreshed on-demand: playlists=${result.playlistCount} songs=${result.songCount}`);
+    }
 
     // 空参数处理：继续上次播放或使用默认歌单
     if (!playlistName) {
@@ -476,15 +535,21 @@ export class VoiceEngine {
    * @param argument - 口令关键词后的文本（用于提取数字）
    */
   private async executeSetVolume(accountId: string, deviceId: string, param: string, argument: string): Promise<void> {
-    // 获取当前音量（从设备配置中读取）
-    let currentVolume = 50; // 默认值
-    const accounts = await this.accountManager.getAccounts();
-    for (const acc of accounts) {
-      const devices = await this.configManager.getDevices(acc.id);
-      const dev = devices.find(d => d.device_id === deviceId);
-      if (dev) {
-        currentVolume = dev.volume || 50;
-        break;
+    let currentVolume = 50;
+
+    if (param === 'up' || param === 'down') {
+      // 相对音量命令：查询设备实际音量，避免本地缓存过期
+      const realVolume = await this.minaService.getVolume(accountId, deviceId);
+      if (realVolume >= 0) {
+        currentVolume = realVolume;
+        songloft.log.info(`[VoiceEngine] Got real device volume: ${realVolume}`);
+      } else {
+        songloft.log.warn('[VoiceEngine] Failed to get real volume, falling back to config');
+        const devices = await this.configManager.getDevices(accountId);
+        const dev = devices.find(d => d.device_id === deviceId);
+        if (dev) {
+          currentVolume = dev.volume || 50;
+        }
       }
     }
 
