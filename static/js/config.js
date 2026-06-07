@@ -91,6 +91,19 @@ export function loadConfig() {
                 externalSearchTokenInput.value = data.data.external_search_token || '';
             }
 
+            // 搜索提示 TTS 配置
+            const interruptTtsEnabled = !!data.data.interrupt_tts_hint_enabled;
+            const interruptTtsSwitch = document.getElementById('interruptTtsHintSwitch');
+            if (interruptTtsSwitch) {
+                interruptTtsSwitch.checked = interruptTtsEnabled;
+            }
+            updateInterruptTtsPanel(interruptTtsEnabled);
+
+            const interruptTtsText = document.getElementById('interruptTtsHintText');
+            if (interruptTtsText) {
+                interruptTtsText.value = data.data.interrupt_tts_hint_text || '正在搜索，请稍候';
+            }
+
             // 时区
             const timezoneSelect = document.getElementById('timezoneSelect');
             if (timezoneSelect && data.data.timezone) {
@@ -335,6 +348,62 @@ export function initExternalSearchUI() {
             } finally {
                 testBtn.disabled = false;
             }
+        });
+    }
+}
+
+// ========== 搜索提示 TTS 配置 ==========
+
+function updateInterruptTtsPanel(enabled) {
+    const panel = document.getElementById('interruptTtsTextPanel');
+    if (panel) {
+        panel.style.display = enabled ? 'block' : 'none';
+    }
+}
+
+/**
+ * 初始化搜索提示 TTS UI 事件
+ */
+export function initInterruptBroadcastUI() {
+    const switchEl = document.getElementById('interruptTtsHintSwitch');
+    if (switchEl) {
+        switchEl.addEventListener('change', function() {
+            const enabled = this.checked;
+            updateInterruptTtsPanel(enabled);
+            apiPost('/config', { interrupt_tts_hint_enabled: enabled })
+                .then(data => {
+                    if (data.success) {
+                        showSnackbar(enabled ? '已启用搜索提示' : '已关闭搜索提示', 'success');
+                    } else {
+                        showSnackbar('操作失败：' + (data.error || '未知错误'), 'error');
+                        switchEl.checked = !enabled;
+                        updateInterruptTtsPanel(!enabled);
+                    }
+                })
+                .catch(error => {
+                    showSnackbar('操作失败：' + error.message, 'error');
+                    switchEl.checked = !enabled;
+                    updateInterruptTtsPanel(!enabled);
+                });
+        });
+    }
+
+    const saveBtn = document.getElementById('saveInterruptTtsTextBtn');
+    if (saveBtn) {
+        saveBtn.addEventListener('click', function() {
+            const input = document.getElementById('interruptTtsHintText');
+            const text = input ? input.value.trim() : '';
+            apiPost('/config', { interrupt_tts_hint_text: text || '正在搜索，请稍候' })
+                .then(data => {
+                    if (data.success) {
+                        showSnackbar('提示语已保存', 'success');
+                    } else {
+                        showSnackbar('保存失败：' + (data.error || '未知错误'), 'error');
+                    }
+                })
+                .catch(error => {
+                    showSnackbar('保存失败：' + error.message, 'error');
+                });
         });
     }
 }

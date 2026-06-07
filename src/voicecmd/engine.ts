@@ -356,6 +356,16 @@ export class VoiceEngine {
   private async executePlayPlaylist(playlistName: string, accountId: string, deviceId: string): Promise<void> {
     const pm = await this.playlistManagerMap.getOrCreate(accountId, deviceId);
 
+    // 空参数 + 有活跃歌单：直接恢复播放，无需搜索和打断
+    if (!playlistName && pm.hasPlaylist()) {
+      songloft.log.info('[VoiceEngine] Play playlist: resume last playback');
+      await pm.next();
+      return;
+    }
+
+    // 打断音箱当前播报
+    await this.interruptBroadcast(accountId, deviceId);
+
     // 检查索引是否就绪，未就绪则尝试按需刷新
     if (!this.indexingManager.isIndexReady()) {
       songloft.log.warn('[VoiceEngine] Playlist index not ready, attempting on-demand refresh');
@@ -367,14 +377,8 @@ export class VoiceEngine {
       songloft.log.info(`[VoiceEngine] Playlist index refreshed on-demand: playlists=${result.playlistCount} songs=${result.songCount}`);
     }
 
-    // 空参数处理：继续上次播放或使用默认歌单
+    // 空参数处理：使用默认歌单
     if (!playlistName) {
-      if (pm.hasPlaylist()) {
-        songloft.log.info('[VoiceEngine] Play playlist: resume last playback');
-        await pm.next(); // 触发播放
-        return;
-      }
-
       // 使用第一个歌单
       const playlists = this.indexingManager.searchPlaylist('');
       if (playlists.length === 0) {
@@ -437,6 +441,9 @@ export class VoiceEngine {
       songloft.log.warn('[VoiceEngine] No song name specified and no active playlist');
       return;
     }
+
+    // 打断音箱当前播报
+    await this.interruptBroadcast(accountId, deviceId);
 
     // 检查索引是否就绪
     if (!this.indexingManager.isIndexReady()) {
@@ -620,6 +627,29 @@ export class VoiceEngine {
     const pm = await this.playlistManagerMap.getOrCreate(accountId, deviceId);
     await pm.stop();
     songloft.log.info(`[VoiceEngine] Playback stopped`);
+  }
+
+  /**
+   * 搜索前打断音箱正在播报的语音，可选播 TTS 提示
+   */
+  private async interruptBroadcast(accountId: string, deviceId: string): Promise<void> {
+    songloft.log.info('[VoiceEngine] Interrupting speaker broadcast before search');
+    try {
+      await this.minaService.stopPlay(accountId, deviceId);
+    } catch (e) {
+      songloft.log.warn('[VoiceEngine] Failed to interrupt broadcast: ' + String(e));
+    }
+
+    const config = await this.configManager.getConfig();
+    if (config.interrupt_tts_hint_enabled) {
+      const text = config.interrupt_tts_hint_text || '正在搜索，请稍候';
+      try {
+        await new Promise(resolve => setTimeout(resolve, 300));
+        await this.minaService.textToSpeech(accountId, deviceId, text);
+      } catch (e) {
+        songloft.log.warn('[VoiceEngine] Failed to play TTS hint: ' + String(e));
+      }
+    }
   }
 
   // ===== 辅助方法 =====

@@ -75,6 +75,8 @@ export function registerConfigHandlers(
           external_search_url: config.external_search_url || '',
           external_search_token: config.external_search_token || '',
           extra_music_api_models: config.extra_music_api_models || [],
+          interrupt_tts_hint_enabled: !!config.interrupt_tts_hint_enabled,
+          interrupt_tts_hint_text: config.interrupt_tts_hint_text || '正在搜索，请稍候',
           server_host_status: getServerHostStatus(config.server_host),
           ai_config: aiConfig,
         },
@@ -142,6 +144,18 @@ export function registerConfigHandlers(
       // 更新 external_search_enabled
       if (body.external_search_enabled !== undefined) {
         config.external_search_enabled = !!body.external_search_enabled;
+      }
+
+      // 更新 interrupt_tts_hint_enabled
+      if (body.interrupt_tts_hint_enabled !== undefined) {
+        config.interrupt_tts_hint_enabled = !!body.interrupt_tts_hint_enabled;
+      }
+
+      // 更新 interrupt_tts_hint_text
+      if (body.interrupt_tts_hint_text !== undefined) {
+        config.interrupt_tts_hint_text = typeof body.interrupt_tts_hint_text === 'string'
+          ? body.interrupt_tts_hint_text.trim()
+          : '正在搜索，请稍候';
       }
 
       // 更新 extra_music_api_models
