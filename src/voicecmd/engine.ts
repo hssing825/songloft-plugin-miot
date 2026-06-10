@@ -9,6 +9,7 @@ import { AccountManager } from '../account/manager';
 import { MinaService } from '../service/service';
 import { PlaylistManagerMap } from '../player/manager';
 import { IndexingManager } from '../indexing/manager';
+import { URLBuilder } from '../player/url_builder';
 import { AIAnalyzer } from './ai_analyzer';
 import { OnlineSearcher } from './online_searcher';
 import type { ConversationMessage, VoiceCommand, PlayMode, AIAnalysisResult } from '../types';
@@ -452,8 +453,19 @@ export class VoiceEngine {
     }
 
     // 从索引中模糊匹配歌曲，获取歌单ID和歌曲索引
-    const loc = await this.indexingManager.findSongByName(songName);
+    let loc = await this.indexingManager.findSongByName(songName);
     if (!loc) {
+      // 尝试查找独立远程歌曲（不在任何歌单中的外部导入歌曲）
+      const standalone = await this.indexingManager.findStandaloneSongByName(songName);
+      if (standalone) {
+        const playUrl = await URLBuilder.buildSongURL(standalone);
+        if (playUrl) {
+          await this.minaService.playURL(accountId, deviceId, playUrl);
+          songloft.log.info('[VoiceEngine] Played standalone remote song: ' + standalone.title + ' - ' + standalone.artist);
+          return;
+        }
+      }
+
       songloft.log.warn(`[VoiceEngine] Song not found locally: ${songName}, trying online search`);
       // 本地缓存歌曲未击中，尝试在线搜索（需配置了外部搜索 API）
       if (!(await this.onlineSearcher.isExternalSearchConfigured())) {
@@ -466,7 +478,10 @@ export class VoiceEngine {
       );
       if (!played) {
         songloft.log.warn(`[VoiceEngine] Online search failed for: ${songName}`);
+        return;
       }
+      // 外部搜索播放成功后刷新索引，后续可直接本地命中
+      await this.indexingManager.refresh();
       return;
     }
 

@@ -264,12 +264,14 @@ export class OnlineSearcher {
         result = JSON.parse(text) as RemoteSongsResponse;
       } catch {
         songloft.log.warn('[OnlineSearcher] Failed to parse remote songs response: ' + text);
-        return null;
+        // 导入失败（可能是 UNIQUE 约束冲突），尝试查找已存在的歌曲
+        return await this.findExistingSong(song.title, song.artist);
       }
 
       if (!result.songs || result.songs.length === 0) {
         songloft.log.warn('[OnlineSearcher] Remote import returned no songs: ' + text);
-        return null;
+        // 导入失败，尝试查找已存在的歌曲
+        return await this.findExistingSong(song.title, song.artist);
       }
 
       const imported = result.songs[0];
@@ -279,5 +281,27 @@ export class OnlineSearcher {
       songloft.log.warn('[OnlineSearcher] Remote import fetch error: ' + String(e));
       return null;
     }
+  }
+
+  /**
+   * 在 Songloft 数据库中查找已存在的外部导入歌曲
+   * 当 /api/v1/songs/remote 因唯一键约束冲突等无法重复导入时作为回退
+   */
+  private async findExistingSong(title: string, artist: string): Promise<{ id: number; url: string } | null> {
+    try {
+      const allSongs = await songloft.songs.list({ limit: 10000 });
+      const match = allSongs.find(s =>
+        s.title === title &&
+        s.artist === artist &&
+        (s.type === 'remote' || s.url?.startsWith('http'))
+      );
+      if (match && match.id && match.url) {
+        songloft.log.info('[OnlineSearcher] Found existing remote song: ' + title + ' - ' + artist + ', id=' + match.id);
+        return { id: match.id, url: match.url };
+      }
+    } catch (e) {
+      songloft.log.warn('[OnlineSearcher] Failed to search existing songs: ' + String(e));
+    }
+    return null;
   }
 }

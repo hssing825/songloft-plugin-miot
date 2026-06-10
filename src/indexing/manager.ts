@@ -467,6 +467,41 @@ export class IndexingManager {
   }
 
   /**
+   * 查找独立远程歌曲（不在任何歌单中）
+   * 当 findSongByName 找不到时回退调用。
+   * 先刷新索引确保包含最新导入的歌曲，然后搜索 title 匹配，通过 ID 获取完整信息。
+   *
+   * @returns 歌曲的 id/url/title/artist，未找到返回 null
+   */
+  async findStandaloneSongByName(songName: string): Promise<{ id: number; url: string; title: string; artist: string } | null> {
+    if (!songName) return null;
+
+    // 刷新索引确保包含最新导入的远程歌曲
+    await this.refresh();
+
+    // 在刷新后的索引中按 title 模糊匹配
+    const matched = this.searchSong(songName);
+    if (matched.length === 0) return null;
+
+    // 通过 ID 获取完整歌曲信息（含 url）
+    try {
+      const fullSong = await songloft.songs.getById(matched[0].id);
+      if (fullSong && fullSong.url) {
+        songloft.log.info('[IndexingManager] Found standalone remote song: ' + matched[0].title + ' - ' + matched[0].artist + ', id=' + matched[0].id);
+        return {
+          id: fullSong.id,
+          url: fullSong.url,
+          title: fullSong.title,
+          artist: fullSong.artist,
+        };
+      }
+    } catch (e) {
+      songloft.log.warn('[IndexingManager] Failed to get standalone song by id: ' + String(e));
+    }
+    return null;
+  }
+
+  /**
    * 索引是否就绪
    */
   isIndexReady(): boolean {
