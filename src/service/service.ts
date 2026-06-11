@@ -117,7 +117,8 @@ export class MinaService {
       const hardware = await this.getDeviceHardware(client, deviceId);
       const config = await this.configManager.getConfig();
       const extraModels = config.extra_music_api_models || [];
-      return await client.playByUrl(deviceId, url, hardware, extraModels);
+      const keepLight = !!config.indicator_light_enabled;
+      return await client.playByUrl(deviceId, url, hardware, extraModels, keepLight);
     } catch (e) {
       songloft.log.error('[MinaService] playURL failed: ' + String(e));
       return false;

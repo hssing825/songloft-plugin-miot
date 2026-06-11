@@ -75,6 +75,7 @@ export function registerConfigHandlers(
           external_search_url: config.external_search_url || '',
           external_search_token: config.external_search_token || '',
           extra_music_api_models: config.extra_music_api_models || [],
+          indicator_light_enabled: !!config.indicator_light_enabled,
           interrupt_tts_hint_enabled: !!config.interrupt_tts_hint_enabled,
           interrupt_tts_hint_text: config.interrupt_tts_hint_text || '正在搜索，请稍候',
           server_host_status: getServerHostStatus(config.server_host),
@@ -144,6 +145,11 @@ export function registerConfigHandlers(
       // 更新 external_search_enabled
       if (body.external_search_enabled !== undefined) {
         config.external_search_enabled = !!body.external_search_enabled;
+      }
+
+      // 更新 indicator_light_enabled
+      if (body.indicator_light_enabled !== undefined) {
+        config.indicator_light_enabled = !!body.indicator_light_enabled;
       }
 
       // 更新 interrupt_tts_hint_enabled

@@ -115,31 +115,31 @@ export class MinaHTTPClient {
    * @param hardware - 设备硬件型号（用于选择播放方法）
    * @param extraModels - 用户自定义的额外 Music API 型号列表
    */
-  async playByUrl(deviceId: string, url: string, hardware = '', extraModels?: string[]): Promise<boolean> {
+  async playByUrl(deviceId: string, url: string, hardware = '', extraModels?: string[], keepLight = false): Promise<boolean> {
     if (hardware && needUsePlayMusicAPI(hardware, extraModels)) {
-      return this.playByMusicURL(deviceId, url);
+      return this.playByMusicURL(deviceId, url, keepLight);
     }
-    return this.playURL(deviceId, url);
+    return this.playURL(deviceId, url, keepLight);
   }
 
   /**
    * 使用 player_play_url 播放 URL
    */
-  async playURL(deviceId: string, url: string): Promise<boolean> {
-    const message = { url, type: 1 };
+  async playURL(deviceId: string, url: string, keepLight = false): Promise<boolean> {
+    const message = { url, type: keepLight ? 1 : 2, media: 'app_ios' };
     return (await this.ubusRequest(deviceId, 'player_play_url', 'mediaplayer', message)) !== null;
   }
 
   /**
    * 使用 player_play_music 播放 URL（用于部分设备型号）
    */
-  async playByMusicURL(deviceId: string, audioUrl: string): Promise<boolean> {
+  async playByMusicURL(deviceId: string, audioUrl: string, keepLight = false): Promise<boolean> {
     const audioId = '1582971365183456177';
     const cpId = '355454500';
 
     const music = {
       payload: {
-        audio_type: 'MUSIC',
+        audio_type: keepLight ? 'MUSIC' : '',
         audio_items: [{
           item_id: {
             audio_id: audioId,

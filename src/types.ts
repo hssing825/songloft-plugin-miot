@@ -93,6 +93,7 @@ export interface PluginConfig {
   external_search_url: string;      // 外部搜索 API 地址
   external_search_token: string;    // 外部搜索 Token 认证
   extra_music_api_models?: string[];
+  indicator_light_enabled?: boolean;
   interrupt_tts_hint_enabled: boolean;
   interrupt_tts_hint_text: string;
   ai_config: AIConfig;

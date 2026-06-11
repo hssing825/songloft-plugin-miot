@@ -68,6 +68,13 @@ export function loadConfig() {
                 forceMp3Switch.checked = forceMp3;
             }
 
+            // 指示灯开关
+            const indicatorLightEnabled = !!data.data.indicator_light_enabled;
+            const indicatorLightSwitch = document.getElementById('indicatorLightSwitch');
+            if (indicatorLightSwitch) {
+                indicatorLightSwitch.checked = indicatorLightEnabled;
+            }
+
             // 自定义 Music API 型号
             const extraModelsInput = document.getElementById('extraMusicApiModelsInput');
             if (extraModelsInput) {
@@ -205,6 +212,41 @@ export function initForceMp3UI() {
             toggleForceMp3(this.checked);
         });
     }
+}
+
+// ========== 指示灯 ==========
+
+/**
+ * 初始化指示灯开关 UI 事件
+ */
+export function initIndicatorLightUI() {
+    const switchEl = document.getElementById('indicatorLightSwitch');
+    if (switchEl) {
+        switchEl.addEventListener('change', function() {
+            toggleIndicatorLight(this.checked);
+        });
+    }
+}
+
+/**
+ * 切换指示灯开关
+ */
+function toggleIndicatorLight(enabled) {
+    apiPost('/config', { indicator_light_enabled: enabled })
+        .then(data => {
+            if (data.success) {
+                showSnackbar(enabled ? '已开启播放时保持指示灯' : '已关闭播放时保持指示灯', 'success');
+            } else {
+                showSnackbar('操作失败：' + (data.error || '未知错误'), 'error');
+                const switchEl = document.getElementById('indicatorLightSwitch');
+                if (switchEl) switchEl.checked = !enabled;
+            }
+        })
+        .catch(error => {
+            showSnackbar('操作失败：' + error.message, 'error');
+            const switchEl = document.getElementById('indicatorLightSwitch');
+            if (switchEl) switchEl.checked = !enabled;
+        });
 }
 
 // ========== 自定义 Music API 型号 ==========
