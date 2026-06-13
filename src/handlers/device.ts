@@ -5,6 +5,7 @@ import { jsonResponse, parseQuery } from '@songloft/plugin-sdk';
 import type { Router, HTTPRequest } from '@songloft/plugin-sdk';
 import { MinaService } from '../service/service';
 import { AccountManager } from '../account/manager';
+import { updateVolumeCache } from './playlist';
 
 /** 解析请求体（兼容 Uint8Array 和 string） */
 function parseBody(req: HTTPRequest): any {
@@ -80,10 +81,12 @@ export function registerDeviceHandlers(
       if (volume === undefined || volume === null) {
         return jsonResponse({ success: false, error: 'volume is required' });
       }
-      const ok = await minaService.setVolume(account_id, device_id, Number(volume));
+      const vol = Number(volume);
+      const ok = await minaService.setVolume(account_id, device_id, vol);
       if (!ok) {
         return jsonResponse({ success: false, error: 'failed to set volume' });
       }
+      updateVolumeCache(account_id, device_id, vol);
       return jsonResponse({ success: true, data: { message: 'success' } });
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });

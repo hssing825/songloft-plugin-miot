@@ -336,6 +336,15 @@ export class PlaylistManager {
   }
 
   /**
+   * 重新推送当前歌曲 URL 到设备（用于语音打断后恢复）
+   * 与 resumePlayback() 不同，这里重新发送 URL 而非简单 resume，
+   * 因为被语音唤醒打断后设备的 URL 播放状态已被清除。
+   */
+  async replayCurrent(): Promise<boolean> {
+    return this.playCurrent();
+  }
+
+  /**
    * 使用已有歌曲列表初始化播放列表（恢复用）
    */
   initWithSongs(songs: Song[], startIndex: number, playMode: PlayMode, playlistId: number): void {

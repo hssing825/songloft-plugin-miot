@@ -294,6 +294,18 @@ export function updatePlayerUI(status) {
         highlightSongItem(status.current_index);
     }
 
+    // 同步设备实际音量到 UI（用户正在拖动滑块时跳过，避免覆盖操作）
+    if (status.volume !== undefined && status.volume >= 0) {
+        const volumeSlider = document.getElementById('volumeSlider');
+        const volumePercent = document.getElementById('volumePercent');
+        if (volumeSlider && !volumeSlider.matches(':active')) {
+            volumeSlider.value = status.volume;
+            if (volumePercent) volumePercent.textContent = status.volume + '%';
+            if (status.volume > 0) lastVolumeBeforeMute = status.volume;
+            updateVolumeIcon(status.volume);
+        }
+    }
+
 }
 
 /**

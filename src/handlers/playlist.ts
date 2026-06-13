@@ -36,6 +36,13 @@ function isLoopbackAddress(host: string): boolean {
   return hostname === 'localhost' || hostname.startsWith('127.') || hostname === '::1';
 }
 
+const volumeCache: Map<string, { volume: number; timestamp: number }> = new Map();
+const VOLUME_CACHE_TTL = 5000;
+
+export function updateVolumeCache(accountId: string, deviceId: string, volume: number): void {
+  volumeCache.set(accountId + ':' + deviceId, { volume, timestamp: Date.now() });
+}
+
 /**
  * 注册歌单播放相关路由
  * GET  /playlists            → 获取歌单列表
@@ -250,7 +257,19 @@ export function registerPlaylistHandlers(
 
       const manager = await playlistManagerMap.getOrCreate(account_id, device_id);
       const status = manager.getStatus();
-      return jsonResponse({ success: true, data: status });
+
+      let volume = -1;
+      const cacheKey = account_id + ':' + device_id;
+      const cached = volumeCache.get(cacheKey);
+      const now = Date.now();
+      if (cached && (now - cached.timestamp) < VOLUME_CACHE_TTL) {
+        volume = cached.volume;
+      } else {
+        volume = await minaService.getVolume(account_id, device_id);
+        volumeCache.set(cacheKey, { volume, timestamp: now });
+      }
+
+      return jsonResponse({ success: true, data: { ...status, volume } });
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }

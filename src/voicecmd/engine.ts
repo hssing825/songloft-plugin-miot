@@ -72,6 +72,8 @@ export class VoiceEngine {
   private aiAnalyzer: AIAnalyzer;
   private onlineSearcher: OnlineSearcher;
   private enabled: boolean = false;
+  private resumeTimer: any = null;
+  private resumeCancelled: boolean = false;
 
   constructor(
     configManager: ConfigManager,
@@ -152,25 +154,12 @@ export class VoiceEngine {
       songloft.log.info(`[VoiceEngine] [Rule] No match found`);
 
       // 任何语音交互都会唤醒音箱并打断 URL 播放。
-      // 立即挂起定时器（防止 AI 响应期间触发切歌），延迟后尝试恢复播放。
+      // 立即挂起定时器（防止 AI 响应期间触发切歌），等小爱说完后重新推送歌曲 URL。
       const pm = this.playlistManagerMap.get(accountId, msg.device_id);
       if (pm && pm.isPlaying()) {
         pm.suspendForVoiceInteraction();
-        songloft.log.info('[VoiceEngine] Unmatched command while playing, suspended timer, will try resume after delay');
-        setTimeout(async () => {
-          try {
-            const ok = await pm.resumePlayback();
-            if (ok) {
-              songloft.log.info('[VoiceEngine] Playback resumed after unmatched command');
-            } else {
-              songloft.log.info('[VoiceEngine] Resume failed after unmatched command, resetting state');
-              pm.prepareForNewPlayback();
-            }
-          } catch (e) {
-            songloft.log.error('[VoiceEngine] Error resuming after unmatched command: ' + String(e));
-            pm.prepareForNewPlayback();
-          }
-        }, 5000);
+        songloft.log.info('[VoiceEngine] Unmatched command while playing, scheduling smart resume');
+        this.scheduleSmartResume(pm, accountId, msg.device_id);
       }
 
       return;
@@ -288,7 +277,7 @@ export class VoiceEngine {
         songloft.log.warn(`[VoiceEngine] Unknown command type: ${result.command.type}`);
     }
 
-    this.tryResumePlayback(result.command.type, wasPlaying, pm);
+    this.tryResumePlayback(result.command.type, wasPlaying, pm, accountId, deviceId);
   }
 
   /**
@@ -348,29 +337,19 @@ export class VoiceEngine {
         songloft.log.warn(`[VoiceEngine] [AI] Unknown action: ${result.action}`);
     }
 
-    this.tryResumePlayback(result.action, wasPlaying, pm);
+    this.tryResumePlayback(result.action, wasPlaying, pm, accountId, deviceId);
   }
 
   /**
    * 非播放类命令执行后，尝试恢复被小爱语音唤醒中断的 URL 播放
    */
-  private tryResumePlayback(commandType: string, wasPlaying: boolean, pm: import('../player/manager').PlaylistManager | null): void {
+  private tryResumePlayback(commandType: string, wasPlaying: boolean, pm: import('../player/manager').PlaylistManager | null, accountId: string, deviceId: string): void {
     const isNonPlaybackCommand = commandType === 'set_volume' || commandType === 'set_play_mode';
     if (!isNonPlaybackCommand || !wasPlaying || !pm) return;
 
-    songloft.log.info('[VoiceEngine] Non-playback command while playing, will resume after delay');
-    setTimeout(async () => {
-      try {
-        const ok = await pm.resumePlayback();
-        if (ok) {
-          songloft.log.info('[VoiceEngine] Playback resumed after voice command');
-        } else {
-          songloft.log.warn('[VoiceEngine] Failed to resume playback');
-        }
-      } catch (e) {
-        songloft.log.error('[VoiceEngine] Error resuming playback: ' + String(e));
-      }
-    }, 2000);
+    pm.suspendForVoiceInteraction();
+    songloft.log.info('[VoiceEngine] Non-playback command while playing, scheduling smart resume');
+    this.scheduleSmartResume(pm, accountId, deviceId);
   }
 
   /**
@@ -378,6 +357,7 @@ export class VoiceEngine {
    * 通过 IndexingManager 模糊匹配歌单名，然后调用 PlaylistManager 播放
    */
   private async executePlayPlaylist(playlistName: string, accountId: string, deviceId: string): Promise<void> {
+    this.cancelPendingResume();
     const pm = await this.playlistManagerMap.getOrCreate(accountId, deviceId);
 
     // 空参数 + 有活跃歌单：直接恢复播放，无需搜索和打断
@@ -456,6 +436,7 @@ export class VoiceEngine {
    * 翻译自 Go 版本: voicecmd/engine.go executePlaySong
    */
   private async executePlaySong(songName: string, accountId: string, deviceId: string): Promise<void> {
+    this.cancelPendingResume();
     const pm = await this.playlistManagerMap.getOrCreate(accountId, deviceId);
 
     // 空参数处理：继续上次播放
@@ -643,6 +624,7 @@ export class VoiceEngine {
    * 执行下一首
    */
   private async executeNext(accountId: string, deviceId: string): Promise<void> {
+    this.cancelPendingResume();
     const pm = await this.playlistManagerMap.getOrCreate(accountId, deviceId);
     const ok = await pm.next();
     if (ok) {
@@ -656,6 +638,7 @@ export class VoiceEngine {
    * 执行上一首
    */
   private async executePrevious(accountId: string, deviceId: string): Promise<void> {
+    this.cancelPendingResume();
     const pm = await this.playlistManagerMap.getOrCreate(accountId, deviceId);
     const ok = await pm.previous();
     if (ok) {
@@ -669,9 +652,65 @@ export class VoiceEngine {
    * 执行停止播放
    */
   private async executeStop(accountId: string, deviceId: string): Promise<void> {
+    this.cancelPendingResume();
     const pm = await this.playlistManagerMap.getOrCreate(accountId, deviceId);
     await pm.stop();
     songloft.log.info(`[VoiceEngine] Playback stopped`);
+  }
+
+  /**
+   * 取消待执行的恢复操作
+   */
+  private cancelPendingResume(): void {
+    if (this.resumeTimer !== null) {
+      clearTimeout(this.resumeTimer);
+      this.resumeTimer = null;
+    }
+    this.resumeCancelled = true;
+  }
+
+  /**
+   * 调度智能恢复：先等 3 秒让小爱开始 TTS，再轮询设备状态等待 TTS 结束后重新推送歌曲
+   */
+  private scheduleSmartResume(pm: import('../player/manager').PlaylistManager, accountId: string, deviceId: string): void {
+    this.cancelPendingResume();
+    this.resumeCancelled = false;
+    this.resumeTimer = setTimeout(async () => {
+      this.resumeTimer = null;
+      await this.smartResume(pm, accountId, deviceId);
+    }, 3000);
+  }
+
+  /**
+   * 等待小爱 TTS 播报结束后重新推送当前歌曲 URL
+   */
+  private async smartResume(pm: import('../player/manager').PlaylistManager, accountId: string, deviceId: string): Promise<void> {
+    if (!pm.isPlaying() || this.resumeCancelled) return;
+
+    const maxWaitMs = 30000;
+    const pollInterval = 2000;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < maxWaitMs) {
+      if (!pm.isPlaying() || this.resumeCancelled) return;
+
+      const status = await this.minaService.getPlayerStatus(accountId, deviceId);
+      const playerStatus = (status?.data as any)?.status;
+      if (playerStatus !== 1) {
+        break;
+      }
+
+      await new Promise(r => setTimeout(r, pollInterval));
+    }
+
+    if (!pm.isPlaying() || this.resumeCancelled) return;
+
+    const ok = await pm.replayCurrent();
+    if (ok) {
+      songloft.log.info('[VoiceEngine] Playback restored via replay after voice interaction');
+    } else {
+      songloft.log.warn('[VoiceEngine] Failed to restore playback after voice interaction');
+    }
   }
 
   /**
