@@ -343,7 +343,11 @@ export function registerPlaylistHandlers(
           if (localStatus.state === 'playing' && cached.state === 'paused') {
             manager.suspendForVoiceInteraction();
           } else if (localStatus.state === 'playing' && cached.state === 'stopped') {
-            manager.prepareForNewPlayback();
+            if (manager.isVoiceSuspendStale()) {
+              manager.prepareForNewPlayback();
+            } else {
+              manager.suspendForVoiceInteraction();
+            }
           }
         }
 
@@ -385,7 +389,11 @@ export function registerPlaylistHandlers(
         if (localStatus.state === 'playing' && realState === 'paused') {
           manager.suspendForVoiceInteraction();
         } else if (localStatus.state === 'playing' && realState === 'stopped') {
-          manager.prepareForNewPlayback();
+          if (manager.isVoiceSuspendStale()) {
+            manager.prepareForNewPlayback();
+          } else {
+            manager.suspendForVoiceInteraction();
+          }
         }
       }
 

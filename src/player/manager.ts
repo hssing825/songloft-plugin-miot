@@ -63,6 +63,7 @@ export class PlaylistManager {
   private totalSongs: number = 0;
   private playStartTimeMs: number = 0;  // 当前歌曲开始播放的时间戳(ms)
   private randomPlayed: Set<number> = new Set(); // 随机模式已播放索引
+  private voiceSuspendedAt: number = 0; // suspendForVoiceInteraction 首次调用时间戳
 
   constructor(
     accountId: string,
@@ -129,6 +130,7 @@ export class PlaylistManager {
    */
   async stop(): Promise<void> {
     this.stopCheckTimer();
+    this.clearVoiceSuspend();
     this.state = 'stopped';
     this.playStartTimeMs = 0;
 
@@ -322,6 +324,7 @@ export class PlaylistManager {
    */
   prepareForNewPlayback(): void {
     this.stopCheckTimer();
+    this.clearVoiceSuspend();
     this.state = 'idle';
     this.playStartTimeMs = 0;
   }
@@ -333,22 +336,44 @@ export class PlaylistManager {
    */
   suspendForVoiceInteraction(): void {
     this.stopCheckTimer();
+    if (this.voiceSuspendedAt === 0) {
+      this.voiceSuspendedAt = Date.now();
+    }
+  }
+
+  isVoiceSuspendStale(): boolean {
+    return this.voiceSuspendedAt > 0 && (Date.now() - this.voiceSuspendedAt) > 60000;
+  }
+
+  private clearVoiceSuspend(): void {
+    this.voiceSuspendedAt = 0;
   }
 
   /**
    * 仅重置切歌定时器（不发送任何设备命令）
    * 用于设备已自动恢复播放的场景，避免多余的 play 命令导致歌曲从头播放
+   * @param devicePositionSec - 设备实际播放位置（秒），优先使用；未提供时回退到挂钟时间
    */
-  resetAutoNextTimer(): void {
+  resetAutoNextTimer(devicePositionSec?: number): void {
     this.stopCheckTimer();
+    this.clearVoiceSuspend();
     const song = this.getCurrentSong();
-    if (song && song.duration > 0 && this.playStartTimeMs > 0) {
+    if (!song || song.duration <= 0) return;
+
+    let remaining: number;
+    if (typeof devicePositionSec === 'number' && devicePositionSec >= 0) {
+      remaining = song.duration - devicePositionSec;
+      this.playStartTimeMs = Date.now() - devicePositionSec * 1000;
+    } else if (this.playStartTimeMs > 0) {
       const elapsedSec = (Date.now() - this.playStartTimeMs) / 1000;
-      const remaining = song.duration - elapsedSec;
-      if (remaining > 0) {
-        this.startCheckTimer(remaining);
-        songloft.log.info(`[PlaylistManager] Timer reset for auto-resume: remaining=${remaining.toFixed(1)}s`);
-      }
+      remaining = song.duration - elapsedSec;
+    } else {
+      return;
+    }
+
+    if (remaining > 0) {
+      this.startCheckTimer(remaining);
+      songloft.log.info(`[PlaylistManager] Timer reset: remaining=${remaining.toFixed(1)}s`);
     }
   }
 
@@ -437,6 +462,7 @@ export class PlaylistManager {
       return false;
     }
 
+    this.clearVoiceSuspend();
     this.state = 'playing';
     this.playStartTimeMs = Date.now();
 

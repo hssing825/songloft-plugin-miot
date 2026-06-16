@@ -682,6 +682,26 @@ export class VoiceEngine {
   }
 
   /**
+   * 从 UBus player_get_play_status 响应中解析设备状态
+   * 响应格式：{ data: { info: '{"status":1,"volume":50,"play_song_detail":{"position":12000,...}}' } }
+   */
+  private parseDeviceStatus(raw: any): { status: number; position: number } {
+    let status = -1;
+    let position = 0;
+    const info = (raw?.data as any)?.info;
+    if (typeof info === 'string') {
+      try {
+        const parsed = JSON.parse(info);
+        if (typeof parsed.status === 'number') status = parsed.status;
+        if (parsed.play_song_detail && typeof parsed.play_song_detail.position === 'number') {
+          position = Math.floor(parsed.play_song_detail.position / 1000);
+        }
+      } catch {}
+    }
+    return { status, position };
+  }
+
+  /**
    * 等待小爱 TTS 播报结束后重新推送当前歌曲 URL
    */
   private async smartResume(pm: import('../player/manager').PlaylistManager, accountId: string, deviceId: string): Promise<void> {
@@ -691,16 +711,18 @@ export class VoiceEngine {
     const pollInterval = 2000;
     const startTime = Date.now();
     let deviceBecameIdle = false;
+    let lastDevicePosition = 0;
 
     while (Date.now() - startTime < maxWaitMs) {
       if (!pm.isPlaying() || this.resumeCancelled) return;
 
-      const status = await this.minaService.getPlayerStatus(accountId, deviceId);
-      const playerStatus = (status?.data as any)?.status;
-      if (playerStatus !== 1) {
+      const raw = await this.minaService.getPlayerStatus(accountId, deviceId);
+      const deviceStatus = this.parseDeviceStatus(raw);
+      if (deviceStatus.status !== 1) {
         deviceBecameIdle = true;
         break;
       }
+      lastDevicePosition = deviceStatus.position;
 
       await new Promise(r => setTimeout(r, pollInterval));
     }
@@ -711,7 +733,7 @@ export class VoiceEngine {
       // 超时退出：设备一直在播放，说明已自动恢复，仅重置切歌定时器
       // 不发送 play 命令，避免部分设备（如 L15A）收到多余指令后从头播放
       songloft.log.info('[VoiceEngine] Device auto-resumed, resetting timer only');
-      pm.resetAutoNextTimer();
+      pm.resetAutoNextTimer(lastDevicePosition);
       return;
     }
 

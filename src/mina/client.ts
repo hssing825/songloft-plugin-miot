@@ -219,8 +219,14 @@ export class MinaHTTPClient {
     const result = await this.getPlayerStatus(deviceId);
     if (result && typeof result.data === 'object' && result.data !== null) {
       const data = result.data as Record<string, unknown>;
-      if (typeof data['volume'] === 'number') {
-        return data['volume'] as number;
+      const info = data['info'];
+      if (typeof info === 'string') {
+        try {
+          const parsed = JSON.parse(info);
+          if (typeof parsed.volume === 'number') {
+            return parsed.volume;
+          }
+        } catch {}
       }
     }
     return -1;
