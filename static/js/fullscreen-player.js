@@ -8,7 +8,7 @@ import {
     formatTime, fetchWithAuth, addStatusListener,
     getCurrentLyrics, getCurrentPosition, getCurrentDuration,
     getIsPlaying, getLastUpdateTime,
-    togglePlayPause, previousSong, nextSong,
+    togglePlayPause, previousSong, nextSong, stopPlaylist,
     playModes, togglePlayModePanel, toggleVolumePanel
 } from './playback.js';
 
@@ -47,6 +47,7 @@ export function initFullscreenPlayer() {
     }
 
     document.getElementById('fpPlayBtn')?.addEventListener('click', togglePlayPause);
+    document.getElementById('fpStopBtn')?.addEventListener('click', stopPlaylist);
     document.getElementById('fpPrevBtn')?.addEventListener('click', previousSong);
     document.getElementById('fpNextBtn')?.addEventListener('click', nextSong);
     document.getElementById('fpPlayModeBtn')?.addEventListener('click', togglePlayModePanel);

@@ -150,6 +150,11 @@ export function stopPlaylist() {
                 const icon = playBtn.querySelector('.material-symbols-outlined');
                 if (icon) icon.textContent = 'play_arrow';
             }
+            const fpPlayBtn = document.getElementById('fpPlayBtn');
+            if (fpPlayBtn) {
+                const fpIcon = fpPlayBtn.querySelector('.material-symbols-outlined');
+                if (fpIcon) fpIcon.textContent = 'play_arrow';
+            }
             showSnackbar('已停止播放', 'success');
             if (window.tracely) {
                 window.tracely.reportEvent('song_stop', { account_id: accountId, device_id: deviceId });
@@ -828,16 +833,21 @@ export function toggleVolumePanel(e) {
     // 先关闭其他弹出层
     closeAllPopups();
 
-    // 定位面板 - 在按钮上方居中
     const rect = btn.getBoundingClientRect();
     const panelWidth = 56;
     let left = rect.left + rect.width / 2 - panelWidth / 2;
     if (left < 16) left = 16;
     if (left + panelWidth > window.innerWidth - 16) left = window.innerWidth - panelWidth - 16;
-
     panel.style.left = left + 'px';
-    panel.style.bottom = (window.innerHeight - rect.top + 8) + 'px';
-    panel.style.top = 'auto';
+
+    const isTopHalf = rect.top < window.innerHeight / 2;
+    if (isTopHalf) {
+        panel.style.top = (rect.bottom + 8) + 'px';
+        panel.style.bottom = 'auto';
+    } else {
+        panel.style.bottom = (window.innerHeight - rect.top + 8) + 'px';
+        panel.style.top = 'auto';
+    }
 
     backdrop.style.display = '';
     panel.classList.add('show');

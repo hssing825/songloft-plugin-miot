@@ -2974,12 +2974,26 @@ html.embed .player-bar-cover {
     height: 100%;
 }
 
-/* Player bar top row (cover + info) */
+/* Player bar top row (cover + info + volume) */
 .player-bar-top {
     display: flex;
     align-items: center;
-    cursor: pointer;
     margin-bottom: 4px;
+}
+
+.player-bar-top-clickable {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+}
+
+.player-bar-volume-btn {
+    flex-shrink: 0;
+    width: 40px;
+    height: 40px;
+    margin-left: 8px;
 }
 
 .player-bar-cover-placeholder {

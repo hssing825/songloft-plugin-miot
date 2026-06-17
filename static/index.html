@@ -649,20 +649,25 @@
 
     <!-- 固定播放控制栏 -->
     <div class="player-bar">
-        <div class="player-bar-top" onclick="openFullscreenPlayer()">
-            <div class="player-bar-cover-wrap" id="playerBarCoverWrap">
-                <img class="player-bar-cover" id="playerBarCover" alt="">
-                <span class="material-symbols-outlined player-bar-cover-placeholder">music_note</span>
-            </div>
-            <div class="player-bar-info">
-                <!-- 歌词行 -->
-                <div class="player-bar-lyric" id="playerBarLyric">暂无歌词</div>
-                <!-- 歌曲信息（封面隐藏时显示） -->
-                <div class="player-bar-meta" id="playerBarMeta">
-                    <div class="player-bar-title" id="currentSongTitle">暂无播放</div>
-                    <div class="player-bar-artist" id="currentSongArtist">-</div>
+        <div class="player-bar-top">
+            <div class="player-bar-top-clickable" onclick="openFullscreenPlayer()">
+                <div class="player-bar-cover-wrap" id="playerBarCoverWrap">
+                    <img class="player-bar-cover" id="playerBarCover" alt="">
+                    <span class="material-symbols-outlined player-bar-cover-placeholder">music_note</span>
+                </div>
+                <div class="player-bar-info">
+                    <!-- 歌词行 -->
+                    <div class="player-bar-lyric" id="playerBarLyric">暂无歌词</div>
+                    <!-- 歌曲信息（封面隐藏时显示） -->
+                    <div class="player-bar-meta" id="playerBarMeta">
+                        <div class="player-bar-title" id="currentSongTitle">暂无播放</div>
+                        <div class="player-bar-artist" id="currentSongArtist">-</div>
+                    </div>
                 </div>
             </div>
+            <button class="btn-icon player-bar-volume-btn" id="volumePopupBtn" title="音量">
+                <span class="material-symbols-outlined" id="volumeIcon">volume_up</span>
+            </button>
         </div>
         <!-- 播放进度条 -->
         <div class="progress-bar-container">
@@ -686,8 +691,8 @@
             <button class="btn-icon" id="nextBtn" title="下一首">
                 <span class="material-symbols-outlined">skip_next</span>
             </button>
-            <button class="btn-icon" id="volumePopupBtn" title="音量">
-                <span class="material-symbols-outlined" id="volumeIcon">volume_up</span>
+            <button class="btn-icon" id="stopBtn" title="停止">
+                <span class="material-symbols-outlined">stop_circle</span>
             </button>
         </div>
     </div>
@@ -957,7 +962,9 @@
                     <span class="material-symbols-outlined">keyboard_arrow_down</span>
                 </button>
                 <span class="fp-topbar-title" id="fpTopbarTitle">正在播放</span>
-                <div style="width:48px"></div>
+                <button class="btn-icon fp-close-btn" id="fpVolumeBtn" title="音量">
+                    <span class="material-symbols-outlined">volume_up</span>
+                </button>
             </div>
             <div class="fp-main">
                 <div class="fp-pages" id="fpPages">
@@ -1003,8 +1010,8 @@
                 <button class="btn-icon" id="fpNextBtn" title="下一首">
                     <span class="material-symbols-outlined">skip_next</span>
                 </button>
-                <button class="btn-icon" id="fpVolumeBtn" title="音量">
-                    <span class="material-symbols-outlined">volume_up</span>
+                <button class="btn-icon" id="fpStopBtn" title="停止">
+                    <span class="material-symbols-outlined">stop_circle</span>
                 </button>
             </div>
         </div>

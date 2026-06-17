@@ -317,6 +317,11 @@ document.addEventListener('DOMContentLoaded', () => {
         nextBtn.addEventListener('click', nextSong);
     }
 
+    const stopBtn = document.getElementById('stopBtn');
+    if (stopBtn) {
+        stopBtn.addEventListener('click', stopPlaylist);
+    }
+
     const playModeBtn = document.getElementById('playModeBtn');
     if (playModeBtn) {
         playModeBtn.addEventListener('click', togglePlayModePanel);
