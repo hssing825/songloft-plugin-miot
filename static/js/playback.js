@@ -21,12 +21,32 @@ let currentLyrics = [];     // 解析后的歌词数组
 let currentLyricUrl = '';   // 当前歌词 URL
 let lyricFetchTimer = null; // 歌词获取防抖定时器
 
+/** 播放栏封面 URL（防重复加载） */
+let currentPlayerBarCoverUrl = '';
+/** 播放栏封面 ObjectURL（供回收） */
+let playerBarCoverObjectUrl = null;
+
+/** 状态监听器列表 */
+const statusListeners = [];
+
+export function addStatusListener(fn) { statusListeners.push(fn); }
+export function removeStatusListener(fn) {
+    const idx = statusListeners.indexOf(fn);
+    if (idx >= 0) statusListeners.splice(idx, 1);
+}
+
+export function getCurrentLyrics() { return currentLyrics; }
+export function getCurrentPosition() { return currentPosition; }
+export function getCurrentDuration() { return currentDuration; }
+export function getIsPlaying() { return isCurrentlyPlaying; }
+export function getLastUpdateTime() { return lastUpdateTime; }
+
 /**
  * 格式化时间为 m:ss 格式
  * @param {number} seconds - 秒数
  * @returns {string} 格式化后的时间字符串
  */
-function formatTime(seconds) {
+export function formatTime(seconds) {
     if (!seconds || seconds < 0) return '0:00';
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
@@ -330,6 +350,33 @@ export function updatePlayerUI(status) {
         }
     }
 
+    // 加载播放栏封面缩略图
+    if (status.current_song && status.current_song.cover_url) {
+        const coverUrl = status.current_song.cover_url;
+        if (coverUrl !== currentPlayerBarCoverUrl) {
+            currentPlayerBarCoverUrl = coverUrl;
+            if (playerBarCoverObjectUrl) {
+                URL.revokeObjectURL(playerBarCoverObjectUrl);
+                playerBarCoverObjectUrl = null;
+            }
+            fetchWithAuth(coverUrl).then(blob => {
+                playerBarCoverObjectUrl = URL.createObjectURL(blob);
+                const img = document.getElementById('playerBarCover');
+                if (img) img.src = playerBarCoverObjectUrl;
+            }).catch(() => {});
+        }
+    } else if (currentPlayerBarCoverUrl) {
+        currentPlayerBarCoverUrl = '';
+        if (playerBarCoverObjectUrl) {
+            URL.revokeObjectURL(playerBarCoverObjectUrl);
+            playerBarCoverObjectUrl = null;
+        }
+        const img = document.getElementById('playerBarCover');
+        if (img) img.src = '';
+    }
+
+    // 通知状态监听器
+    for (const fn of statusListeners) fn(status);
 }
 
 /**
@@ -785,7 +832,7 @@ export function closeVolumePanel() {
  * @param {string} url - 主程序 API 路径（如 /api/v1/songs/4/cover）
  * @returns {Promise<Blob|null>}
  */
-function fetchWithAuth(url) {
+export function fetchWithAuth(url) {
     const token = getAuthToken();
     const headers = {};
     if (token) {

@@ -49,6 +49,7 @@ import { submitCaptcha, openVerifyUrl, submitVerifyCode, startQRCodeLogin } from
 import { Tracely } from './tracely-sdk.js';
 import { initScheduleUI, loadSchedules } from './schedule.js';
 import { initIndexingUI, loadIndexStatus } from './indexing.js';
+import { initFullscreenPlayer, openFullscreenPlayer, closeFullscreenPlayer } from './fullscreen-player.js';
 
 // ========== Tab 切换逻辑 ==========
 
@@ -133,6 +134,10 @@ window.closeVolumePanel = closeVolumePanel;
 window.closeAllPopups = closeAllPopups;
 window.togglePlaylistSelectPanel = togglePlaylistSelectPanel;
 window.closePlaylistSelectPanel = closePlaylistSelectPanel;
+
+// 全屏播放器
+window.openFullscreenPlayer = openFullscreenPlayer;
+window.closeFullscreenPlayer = closeFullscreenPlayer;
 
 // URL 播放
 window.playUrl = playUrl;
@@ -472,6 +477,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 初始化时区设置 UI
     initTimezoneUI();
+
+    // 初始化全屏播放器
+    initFullscreenPlayer();
 
     // 初始化控制状态
     updateControlState();

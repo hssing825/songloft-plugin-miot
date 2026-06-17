@@ -649,13 +649,19 @@
 
     <!-- 固定播放控制栏 -->
     <div class="player-bar">
-        <div class="player-bar-info">
-            <!-- 歌词行 -->
-            <div class="player-bar-lyric" id="playerBarLyric">暂无歌词</div>
-            <!-- 歌曲信息（封面隐藏时显示） -->
-            <div class="player-bar-meta" id="playerBarMeta">
-                <div class="player-bar-title" id="currentSongTitle">暂无播放</div>
-                <div class="player-bar-artist" id="currentSongArtist">-</div>
+        <div class="player-bar-top" onclick="openFullscreenPlayer()">
+            <div class="player-bar-cover-wrap" id="playerBarCoverWrap">
+                <img class="player-bar-cover" id="playerBarCover" alt="">
+                <span class="material-symbols-outlined player-bar-cover-placeholder">music_note</span>
+            </div>
+            <div class="player-bar-info">
+                <!-- 歌词行 -->
+                <div class="player-bar-lyric" id="playerBarLyric">暂无歌词</div>
+                <!-- 歌曲信息（封面隐藏时显示） -->
+                <div class="player-bar-meta" id="playerBarMeta">
+                    <div class="player-bar-title" id="currentSongTitle">暂无播放</div>
+                    <div class="player-bar-artist" id="currentSongArtist">-</div>
+                </div>
             </div>
         </div>
         <!-- 播放进度条 -->
@@ -936,6 +942,69 @@
                 <button class="btn-filled" id="scheduleFormSaveBtn">
                     <span class="material-symbols-outlined" style="font-size:18px">save</span>
                     保存
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 全屏播放器 -->
+    <div class="fullscreen-player" id="fullscreenPlayer">
+        <div class="fp-bg-image" id="fpBgImage"></div>
+        <div class="fp-bg-overlay"></div>
+        <div class="fp-content">
+            <div class="fp-topbar">
+                <button class="btn-icon fp-close-btn" onclick="closeFullscreenPlayer()">
+                    <span class="material-symbols-outlined">keyboard_arrow_down</span>
+                </button>
+                <span class="fp-topbar-title" id="fpTopbarTitle">正在播放</span>
+                <div style="width:48px"></div>
+            </div>
+            <div class="fp-main">
+                <div class="fp-pages" id="fpPages">
+                    <div class="fp-page fp-cover-page">
+                        <div class="fp-cover-wrap" id="fpCoverWrap">
+                            <img class="fp-cover-img" id="fpCoverImg" alt="">
+                            <span class="material-symbols-outlined fp-cover-placeholder" id="fpCoverPlaceholder">music_note</span>
+                        </div>
+                    </div>
+                    <div class="fp-page fp-lyrics-page">
+                        <div class="fp-lyrics-container" id="fpLyricsContainer">
+                            <div class="fp-lyrics-empty">暂无歌词</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="fp-page-indicator" id="fpPageIndicator">
+                    <span class="fp-dot active"></span>
+                    <span class="fp-dot"></span>
+                </div>
+            </div>
+            <div class="fp-song-info">
+                <div class="fp-song-title" id="fpSongTitle">暂无播放</div>
+                <div class="fp-song-artist" id="fpSongArtist">-</div>
+            </div>
+            <div class="fp-progress">
+                <span class="fp-time" id="fpCurrentTime">0:00</span>
+                <div class="fp-progress-track" id="fpProgressTrack">
+                    <div class="fp-progress-fill" id="fpProgressFill"></div>
+                    <div class="fp-progress-thumb" id="fpProgressThumb"></div>
+                </div>
+                <span class="fp-time" id="fpTotalTime">0:00</span>
+            </div>
+            <div class="fp-controls">
+                <button class="btn-icon" id="fpPlayModeBtn" title="播放模式">
+                    <span class="material-symbols-outlined">repeat</span>
+                </button>
+                <button class="btn-icon" id="fpPrevBtn" title="上一首">
+                    <span class="material-symbols-outlined">skip_previous</span>
+                </button>
+                <button class="btn-icon fp-play-btn" id="fpPlayBtn" title="播放">
+                    <span class="material-symbols-outlined">play_arrow</span>
+                </button>
+                <button class="btn-icon" id="fpNextBtn" title="下一首">
+                    <span class="material-symbols-outlined">skip_next</span>
+                </button>
+                <button class="btn-icon" id="fpVolumeBtn" title="音量">
+                    <span class="material-symbols-outlined">volume_up</span>
                 </button>
             </div>
         </div>
