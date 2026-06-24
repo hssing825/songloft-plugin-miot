@@ -294,6 +294,13 @@
                         </label>
                     </div>
 
+                    <!-- 轮询间隔 -->
+                    <div class="form-group" style="margin-top:12px">
+                        <label class="form-label">轮询间隔（秒）</label>
+                        <input type="number" class="text-field" id="conversationPollInterval" min="1" max="30" value="1" aria-label="对话轮询间隔">
+                        <div style="margin-top:4px;font-size:12px;color:#999">检测语音指令的频率，值越小响应越快，1-30 秒</div>
+                    </div>
+
                     <!-- 监听状态 -->
                     <div id="conversationStatusPanel" style="display:none;margin-top:12px">
                         <div class="status-chips" id="conversationDeviceChips"></div>
@@ -347,6 +354,11 @@
                             <span class="material-symbols-outlined" style="font-size:16px">refresh</span>
                             刷新索引
                         </button>
+                    </div>
+                    <div class="form-group" style="margin-top:12px">
+                        <label class="form-label">最大索引歌曲数</label>
+                        <input type="number" class="text-field" id="maxSongIndex" min="1000" max="100000" step="1000" value="10000" aria-label="最大索引歌曲数">
+                        <div style="margin-top:4px;font-size:12px;color:#999">索引加载的最大歌曲数量，大曲库可适当调高，1000-100000</div>
                     </div>
                 </div>
             </div>
@@ -553,6 +565,12 @@
                                 <span class="material-symbols-outlined" style="font-size:16px">save</span>
                             </button>
                         </div>
+                    </div>
+                    <!-- 语音恢复超时 -->
+                    <div class="form-group" style="margin-top:16px">
+                        <label class="form-label">语音恢复等待超时（秒）</label>
+                        <input type="number" class="text-field" id="smartResumeTimeout" min="5" max="120" value="30" aria-label="语音恢复超时">
+                        <div style="margin-top:4px;font-size:12px;color:#999">语音交互后等待音箱回复结束的最大时间，超时后自动恢复播放，5-120 秒</div>
                     </div>
                 </div>
             </div>

@@ -144,6 +144,24 @@ export function loadConfig() {
                 timezoneSelect.value = data.data.timezone;
             }
 
+            // 轮询间隔
+            const pollIntervalInput = document.getElementById('conversationPollInterval');
+            if (pollIntervalInput) {
+                pollIntervalInput.value = data.data.conversation_poll_interval ?? 1;
+            }
+
+            // 语音恢复超时
+            const smartResumeInput = document.getElementById('smartResumeTimeout');
+            if (smartResumeInput) {
+                smartResumeInput.value = data.data.smart_resume_timeout ?? 30;
+            }
+
+            // 最大索引歌曲数
+            const maxSongIndexInput = document.getElementById('maxSongIndex');
+            if (maxSongIndexInput) {
+                maxSongIndexInput.value = data.data.max_song_index ?? 10000;
+            }
+
             // 加载语音口令配置
             loadVoiceCommands();
 
@@ -275,6 +293,71 @@ export function initServerHostUI() {
         } else {
             customInput.style.display = 'none';
         }
+    });
+}
+
+// ========== 可配置数值参数 ==========
+
+/**
+ * 初始化轮询间隔 UI
+ */
+export function initPollIntervalUI() {
+    const input = document.getElementById('conversationPollInterval');
+    if (!input) return;
+    input.addEventListener('change', function() {
+        const val = Math.max(1, Math.min(30, parseInt(this.value) || 1));
+        this.value = val;
+        apiPost('/config', { conversation_poll_interval: val })
+            .then(data => {
+                if (data.success) {
+                    showSnackbar('轮询间隔已设为 ' + val + ' 秒', 'success');
+                } else {
+                    showSnackbar('保存失败：' + (data.error || '未知错误'), 'error');
+                }
+            })
+            .catch(error => showSnackbar('保存失败：' + error.message, 'error'));
+    });
+}
+
+/**
+ * 初始化语音恢复超时 UI
+ */
+export function initSmartResumeUI() {
+    const input = document.getElementById('smartResumeTimeout');
+    if (!input) return;
+    input.addEventListener('change', function() {
+        const val = Math.max(5, Math.min(120, parseInt(this.value) || 30));
+        this.value = val;
+        apiPost('/config', { smart_resume_timeout: val })
+            .then(data => {
+                if (data.success) {
+                    showSnackbar('语音恢复超时已设为 ' + val + ' 秒', 'success');
+                } else {
+                    showSnackbar('保存失败：' + (data.error || '未知错误'), 'error');
+                }
+            })
+            .catch(error => showSnackbar('保存失败：' + error.message, 'error'));
+    });
+}
+
+/**
+ * 初始化最大索引歌曲数 UI
+ */
+export function initMaxSongIndexUI() {
+    const input = document.getElementById('maxSongIndex');
+    if (!input) return;
+    input.addEventListener('change', function() {
+        const val = Math.max(1000, Math.min(100000, parseInt(this.value) || 10000));
+        this.value = val;
+        apiPost('/config', { max_song_index: val })
+            .then(data => {
+                if (data.success) {
+                    showSnackbar('最大索引数已设为 ' + val, 'success');
+                } else {
+                    showSnackbar('保存失败：' + (data.error || '未知错误'), 'error');
+                }
+            })
+            .catch(error => showSnackbar('保存失败：' + error.message, 'error'));
     });
 }
 
