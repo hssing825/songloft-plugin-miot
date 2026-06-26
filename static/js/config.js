@@ -79,6 +79,23 @@ export function loadConfig() {
                 indicatorLightSwitch.checked = indicatorLightEnabled;
             }
 
+            // 触屏版默认封面
+            const defaultCoverId = data.data.default_cover_id;
+            const coverSelect = document.getElementById('defaultCoverSelect');
+            const coverPreview = document.getElementById('defaultCoverPreview');
+            if (coverSelect && defaultCoverId) {
+                coverSelect.value = defaultCoverId;
+                if (coverPreview) {
+                    const selectedOption = coverSelect.options[coverSelect.selectedIndex];
+                    if (selectedOption) {
+                        const imgSrc = selectedOption.getAttribute('data-img');
+                        if (imgSrc) {
+                            coverPreview.src = imgSrc;
+                        }
+                    }
+                }
+            }
+
             // 自定义 Music API 型号
             const extraModelsInput = document.getElementById('extraMusicApiModelsInput');
             if (extraModelsInput) {
@@ -446,6 +463,38 @@ function toggleIndicatorLight(enabled) {
             const switchEl = document.getElementById('indicatorLightSwitch');
             if (switchEl) switchEl.checked = !enabled;
         });
+}
+
+// ========== 默认封面 ==========
+/**
+ * 初始化触屏版默认封面 UI 事件
+ */
+export function initDefaultCoverUI() {
+    const coverSelect = document.getElementById('defaultCoverSelect');
+    const coverPreview = document.getElementById('defaultCoverPreview');
+
+    if (coverSelect && coverPreview) {
+        coverSelect.addEventListener('change', function() {
+            // 获取当前选中的 option
+            const selectedOption = this.options[this.selectedIndex];
+            // 读取 data-img 属性并赋值给 img 标签
+            const imgSrc = selectedOption.getAttribute('data-img');
+            if (imgSrc) {
+                coverPreview.src = imgSrc;
+            }
+
+            // 当用户选择后，立刻静默保存到服务器
+            apiPost('/config', { default_cover_id: this.value })
+                .then(data => {
+                    if (data.success) {
+                        showSnackbar('默认封面已更新', 'success');
+                    } else {
+                        showSnackbar('保存失败：' + (data.error || '未知错误'), 'error');
+                    }
+                })
+                .catch(error => showSnackbar('保存失败：' + error.message, 'error'));
+        });
+    }
 }
 
 // ========== 自定义 Music API 型号 ==========

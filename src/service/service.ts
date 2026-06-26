@@ -118,7 +118,8 @@ export class MinaService {
       const config = await this.configManager.getConfig();
       const extraModels = config.extra_music_api_models || [];
       const keepLight = !!config.indicator_light_enabled;
-      return await client.playByUrl(deviceId, url, hardware, extraModels, keepLight);
+      const customAudioId = config.default_cover_id;
+      return await client.playByUrl(deviceId, url, hardware, extraModels, keepLight, customAudioId);
     } catch (e) {
       songloft.log.error('[MinaService] playURL failed: ' + String(e));
       return false;

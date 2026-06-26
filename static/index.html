@@ -260,6 +260,48 @@
                 </div>
             </div>
 
+            <!-- 默认封面 -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="material-symbols-outlined">image</span>
+                    默认封面
+                </div>
+                <div class="card-body">
+                    <div style="display: flex; gap: 16px; align-items: flex-end;">
+
+                        <div style="flex: 1; display: flex; flex-direction: column; gap: 8px;">
+                            <div class="switch-row-label">
+                                <span class="switch-row-title">小爱触屏音箱 / 小爱音箱APP封面展示</span>
+                                <span class="switch-row-subtitle">选择一个做为默认显示封面</span>
+                            </div>
+
+                            <select class="select-field" id="defaultCoverSelect" aria-label="触屏版默认封面" style="width: 100%; background-image: url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24'%3E%3Cpath fill='%2379747E' d='M7 10l5 5 5-5z'/%3E%3C/svg%3E&quot;) !important; background-repeat: no-repeat !important; background-position: right 10px center !important;">
+                                <option value="1732418460076477549" data-img="https://p1.music.126.net/y06BHfRn9piijiVWfnP0-Q==/109951166970458072.jpg">LOFT·浮光海岸</option>
+                                <option value="1674532961410650324" data-img="https://p1.music.126.net/_zoAgg0syiZnUDov2H7Drw==/109951162812527373.jpg">LOFT·海隅</option>
+                                <option value="2882532372925909032" data-img="https://p1.music.126.net/5ccVkZw2OilbPWJg4K_qPg==/109951168994464259.jpg">LOFT·光域</option>
+                                <option value="436490277987655" data-img="https://y.gtimg.cn/music/photo_new/T001R500x500M000000XFSu32aHi5w_7.jpg">星河雀影</option>
+                                <option value="2284848025338642973" data-img="https://y.gtimg.cn/music/photo_new/T002R500x500M000003MUXTN0hp00B_1.jpg">鲸落</option>
+                                <option value="3032977774822294038" data-img="https://y.gtimg.cn/music/photo_new/T002R500x500M000000P52RF0ePrMh_1.jpg">仲夏涟漪</option>
+                                <option value="3573885250148762567" data-img="https://y.gtimg.cn/music/photo_new/T002R500x500M000001XSQmy0sbGRe_1.jpg">星辰妙漫</option>
+                                <option value="2821554561643067278" data-img="https://y.gtimg.cn/music/photo_new/T002R500x500M000003mtKhW0DFTMt_3.jpg">所念皆星河</option>
+                                <option value="1949968393125757902" data-img="https://y.gtimg.cn/music/photo_new/T002R500x500M000003zlK2H16UvnY_2.jpg">柳岸泊舟</option>
+                                <option value="1963040443250771008" data-img="https://y.gtimg.cn/music/photo_new/T002R500x500M000004HWTo41EPK3L_2.jpg">花冠少女</option>
+                                <option value="703059981413384476" data-img="https://y.gtimg.cn/music/photo_new/T002R500x500M000002OGzkK12zb2D_1.jpg">月夜</option>
+                                <option value="2182123779048604035" data-img="https://y.gtimg.cn/music/photo_new/T002R500x500M000001wIZl83iCjqo_1.jpg">橘子海</option>
+                                <option value="1299407089048748519" data-img="https://y.gtimg.cn/music/photo_new/T001R500x500M000002knSQ01Ts1vS_0.jpg">拾音者</option>
+                                <option value="2234266363446166675" data-img="https://y.gtimg.cn/music/photo_new/T002R500x500M000003TkJYk3nWUoB_2.jpg">唱片</option>
+                                <option value="224322594261696542" data-img="https://y.gtimg.cn/music/photo_new/T002R500x500M000003k0x5s4Ale28_1.jpg">音符</option>
+                            </select>
+                        </div>
+
+                        <div style="flex-shrink:0; border-radius:var(--md-radius-sm); overflow:hidden; box-shadow:var(--md-shadow-1); border:1px solid var(--md-outline-variant);">
+                            <img id="defaultCoverPreview" src="" alt="封面预览" style="display:block; width:76px; height:76px; object-fit:cover;">
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+
             <!-- 自定义 Music API 型号 -->
             <div class="card">
                 <div class="card-header">
