@@ -302,7 +302,7 @@ export function registerDeviceHandlers(
       }
 
       // 同步给宿主内部缓存（与旧接口共享同一个缓存池）
-      updateDeviceStatusCache(account_id, device_id, { state, position, volume });
+      updateDeviceStatusCache(account_id, device_id, { state, position, volume: volume ?? undefined });
 
       return jsonResponse({
         success: true,
