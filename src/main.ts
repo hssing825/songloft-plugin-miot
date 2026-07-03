@@ -84,7 +84,7 @@ async function onInit(): Promise<void> {
   registerConfigHandlers(router, configManager, conversationMonitor, scheduler, voiceEngine);
   registerConversationHandlers(router, conversationMonitor, configManager);
   registerScheduleHandlers(router, scheduler, configManager);
-  registerVoiceCommandHandlers(router, configManager);
+  registerVoiceCommandHandlers(router, configManager, voiceEngine);
   registerIndexingHandlers(router, indexingManager);
 
   // 自动登录 + 启动后台服务（异步，不阻塞插件初始化）

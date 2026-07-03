@@ -474,6 +474,19 @@
                         </button>
                     </div>
 
+                    <!-- 口令测试（模拟语音，完整匹配+执行） -->
+                    <div style="margin-top:16px;padding:10px 12px;background:rgba(0,0,0,0.03);border-radius:6px">
+                        <div style="font-size:12px;color:var(--md-on-surface-variant);margin-bottom:6px;font-weight:500">口令测试（模拟语音）</div>
+                        <div style="font-size:12px;color:#999;margin-bottom:8px;line-height:1.5">输入一句话，效果等同于当前所选设备收到该语音口令（会实际投放播放），并显示匹配到的口令与搜索到的歌曲/歌单。</div>
+                        <div style="display:flex;gap:6px">
+                            <input type="text" id="voiceCmdTestInput" class="text-field" style="flex:1;font-size:13px;padding:6px 10px" placeholder="例如「我今天想听周杰伦的晴天」" aria-label="口令测试输入">
+                            <button class="btn-filled" id="voiceCmdTestBtn" style="padding:6px 16px">
+                                <span class="material-symbols-outlined" style="font-size:16px">play_arrow</span>
+                            </button>
+                        </div>
+                        <div id="voiceCmdTestResult" style="margin-top:8px;font-size:12px;color:var(--md-on-surface-variant);white-space:pre-wrap;word-break:break-all;display:none"></div>
+                    </div>
+
                     <!-- AI 分析配置 -->
                     <div class="voice-cmd-ai-panel" id="aiAnalysisPanel" style="margin-top:16px">
                         <div class="section-title">
@@ -677,6 +690,26 @@
                         <button class="btn-filled" id="playUrlBtn">
                             <span class="material-symbols-outlined">play_arrow</span>
                             播放
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 文字播报 (TTS) 卡片 -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="material-symbols-outlined">record_voice_over</span>
+                    文字播报
+                </div>
+                <div class="card-body">
+                    <div class="form-group">
+                        <label class="form-label">播报文字</label>
+                        <input type="text" class="text-field" id="ttsInput" placeholder="输入要让音箱播报的文字" aria-label="TTS 播报文字">
+                    </div>
+                    <div style="margin-top:12px;text-align:center">
+                        <button class="btn-filled" id="ttsBtn">
+                            <span class="material-symbols-outlined">campaign</span>
+                            播报
                         </button>
                     </div>
                 </div>

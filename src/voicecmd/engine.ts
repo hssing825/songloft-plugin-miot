@@ -24,6 +24,28 @@ interface MatchResult {
   argument: string;
 }
 
+/** 口令测试结果（供设置页「口令测试」展示） */
+export interface CommandTestResult {
+  /** 是否匹配到口令 */
+  matched: boolean;
+  /** 匹配来源：ai 分析 / 规则匹配 / 未匹配 */
+  source: 'ai' | 'rule' | 'none';
+  /** AI 分析结果（AI 启用时带回，无论是否采用） */
+  ai?: { action: string; confidence: string; params: any } | null;
+  /** 命令类型（play_song/play_playlist/...） */
+  commandType?: string;
+  /** 命中的关键词（规则匹配时） */
+  keyword?: string;
+  /** 口令后提取出的搜索参数 */
+  argument?: string;
+  /** 搜索预览：将命中的歌曲/歌单 */
+  search?: { kind: 'song' | 'playlist'; found: boolean; detail: string } | null;
+  /** 是否已实际执行（投放到设备） */
+  executed: boolean;
+  /** 附加说明 */
+  note?: string;
+}
+
 /** 口令类型优先级（数字越小优先级越高） */
 const COMMAND_PRIORITY: Record<string, number> = {
   'play_song': 1,
@@ -34,6 +56,52 @@ const COMMAND_PRIORITY: Record<string, number> = {
   'previous': 6,
   'stop': 7,
 };
+
+/** 跳字模糊匹配：关键词中间最多允许插入的字符数 */
+const FUZZY_MAX_GAP = 4;
+
+/** 跳字模糊匹配：关键词最小 rune 长度（2 字以内控制词如"停止/切歌"不参与，避免误触发） */
+const FUZZY_MIN_KEYWORD_LEN = 3;
+
+/**
+ * 有界跳字子序列匹配：在 query 的 rune 数组中按序查找关键词，允许中间插入有限字符。
+ *
+ * 对每个 `=== kwRunes[0]` 的位置作锚点各自贪心向后匹配（避免"最左锚点"漏掉更紧凑的匹配），
+ * 命中后 inserted = (lastIdx - firstIdx + 1) - kwLen，仅当 inserted <= maxGap 视为候选，
+ * 取 inserted 最小者返回。用于口令精确匹配零命中时的兜底（如"我想听" ⊇ "我今天想听"）。
+ *
+ * @returns 最佳候选的 { lastIdx, inserted }，无候选返回 null
+ */
+function fuzzySubseqMatch(qRunes: string[], kwRunes: string[], maxGap: number): { lastIdx: number; inserted: number } | null {
+  const kwLen = kwRunes.length;
+  if (kwLen < FUZZY_MIN_KEYWORD_LEN) return null;
+  if (qRunes.length < kwLen) return null;
+
+  let best: { lastIdx: number; inserted: number } | null = null;
+
+  for (let start = 0; start <= qRunes.length - kwLen; start++) {
+    if (qRunes[start] !== kwRunes[0]) continue;
+
+    // 从 start 起贪心按序匹配关键词其余字符
+    let ki = 1;
+    let qi = start + 1;
+    while (qi < qRunes.length && ki < kwLen) {
+      if (qRunes[qi] === kwRunes[ki]) ki++;
+      qi++;
+    }
+    if (ki < kwLen) continue; // 关键词未完整命中
+
+    const lastIdx = qi - 1;
+    const inserted = (lastIdx - start + 1) - kwLen;
+    if (inserted > maxGap) continue;
+
+    if (best === null || inserted < best.inserted) {
+      best = { lastIdx, inserted };
+    }
+  }
+
+  return best;
+}
 
 // ===== 默认口令配置 =====
 
@@ -173,6 +241,131 @@ export class VoiceEngine {
   }
 
   /**
+   * 测试口令：模拟收到一条语音指令，走与 handleMessage 相同的 AI/规则匹配 + 执行逻辑，
+   * 并返回诊断信息（匹配到的口令、搜索到的歌曲/歌单、是否执行）供设置页展示。
+   * 与 handleMessage 不同：query 直接给定、忽略引擎启停状态、返回结构化结果。
+   *
+   * @param query - 模拟的用户语音文本
+   * @param deviceId - 目标设备（实际投放到该设备）
+   * @param accountId - 可选，缺省时按 deviceId 反查
+   */
+  async testCommand(query: string, deviceId: string, accountId?: string): Promise<CommandTestResult> {
+    const q = (query || '').trim();
+    if (!q) {
+      return { matched: false, source: 'none', executed: false, note: '查询为空' };
+    }
+
+    let acc = accountId;
+    if (!acc) {
+      acc = (await this.findAccountForDevice(deviceId)) || undefined;
+    }
+    if (!acc || !deviceId) {
+      return { matched: false, source: 'none', executed: false, note: '未找到设备对应的账号，请先选择有效设备' };
+    }
+
+    // AI 路径（与 handleMessage 一致：高置信度且识别到有效 action 才执行）
+    const aiConfig = await this.configManager.getAIConfig();
+    if (aiConfig.enabled) {
+      const aiResult = await this.aiAnalyzer.analyze(q, aiConfig);
+      if (aiResult && aiResult.confidence === 'high' && aiResult.action !== 'unknown') {
+        const search = await this.previewForAI(aiResult);
+        await this.executeAIResult(aiResult, acc, deviceId);
+        return {
+          matched: true,
+          source: 'ai',
+          ai: { action: aiResult.action, confidence: aiResult.confidence, params: aiResult.params },
+          commandType: aiResult.action,
+          argument: aiResult.params?.name || aiResult.params?.playlist || aiResult.params?.artist || '',
+          search,
+          executed: true,
+        };
+      }
+      // AI 未达标 → 回退规则匹配，同时把 AI 结果带回给前端展示
+      const ruleRes = await this.testRule(q, acc, deviceId);
+      ruleRes.ai = aiResult
+        ? { action: aiResult.action, confidence: aiResult.confidence, params: aiResult.params }
+        : null;
+      if (!ruleRes.note) {
+        ruleRes.note = 'AI 未达高置信度或未识别，已回退规则匹配';
+      }
+      return ruleRes;
+    }
+
+    return await this.testRule(q, acc, deviceId);
+  }
+
+  /** 规则匹配测试：匹配 + 执行 + 返回诊断 */
+  private async testRule(query: string, accountId: string, deviceId: string): Promise<CommandTestResult> {
+    const result = await this.matchCommand(query);
+    if (!result) {
+      return { matched: false, source: 'rule', executed: false, note: '未匹配到任何口令' };
+    }
+    const search = await this.previewSearch(result.command.type, result.argument);
+    await this.executeCommand(result, accountId, deviceId);
+    return {
+      matched: true,
+      source: 'rule',
+      commandType: result.command.type,
+      keyword: result.keyword,
+      argument: result.argument,
+      search,
+      executed: true,
+    };
+  }
+
+  /** 搜索预览：按命令类型在本地索引查一遍，报告将命中的歌曲/歌单（不影响实际执行） */
+  private async previewSearch(
+    type: string,
+    argument: string,
+    artist?: string,
+  ): Promise<{ kind: 'song' | 'playlist'; found: boolean; detail: string } | null> {
+    if (type === 'play_song') {
+      const term = artist && artist.trim() ? `${argument} ${artist.trim()}` : (argument || '');
+      if (!term.trim()) {
+        return { kind: 'song', found: false, detail: '（无歌名，将恢复上次播放）' };
+      }
+      if (!this.indexingManager.isIndexReady()) {
+        return { kind: 'song', found: false, detail: '索引未就绪，无法预览搜索结果' };
+      }
+      const loc = await this.indexingManager.findSongByName(term);
+      if (loc) {
+        const artistStr = loc.artist ? ` - ${loc.artist}` : '';
+        return { kind: 'song', found: true, detail: `${loc.songTitle}${artistStr}（歌单：${loc.playlistName}）` };
+      }
+      return { kind: 'song', found: false, detail: `本地索引未命中「${term}」，将尝试独立歌曲/外部搜索` };
+    }
+    if (type === 'play_playlist') {
+      if (!(argument || '').trim()) {
+        return { kind: 'playlist', found: false, detail: '（无歌单名，将使用默认歌单/恢复播放）' };
+      }
+      const pl = this.indexingManager.findPlaylistByName(argument);
+      if (pl) {
+        return { kind: 'playlist', found: true, detail: `${pl.name}（${pl.songCount} 首）` };
+      }
+      return { kind: 'playlist', found: false, detail: `未找到歌单「${argument}」` };
+    }
+    return null;
+  }
+
+  /** AI 结果的搜索预览（与 executeAIResult 的传参口径一致） */
+  private async previewForAI(
+    aiResult: AIAnalysisResult,
+  ): Promise<{ kind: 'song' | 'playlist'; found: boolean; detail: string } | null> {
+    if (aiResult.action === 'play_song') {
+      const name = aiResult.params?.name || '';
+      const artist = aiResult.params?.artist || '';
+      if (name && artist) {
+        return this.previewSearch('play_song', name, artist);
+      }
+      return this.previewSearch('play_song', name || artist);
+    }
+    if (aiResult.action === 'play_playlist') {
+      return this.previewSearch('play_playlist', aiResult.params?.playlist || '');
+    }
+    return null;
+  }
+
+  /**
    * 从 ConversationMessage 中提取用户 query
    */
   private extractQuery(msg: ConversationMessage): string {
@@ -225,6 +418,39 @@ export class VoiceEngine {
               argument: query.slice(idx + keyword.length).trim(),
             };
           }
+        }
+      }
+    }
+
+    if (bestMatch) {
+      return bestMatch;
+    }
+
+    // 第二趟：精确匹配零命中时，跑有界跳字子序列兜底（如"我想听" ⊇ "我今天想听"）。
+    // tiebreak 与第一趟一致：最长关键词 > inserted 最小 > 高优先级。
+    const qRunes = Array.from(query);
+    let bestInserted = Infinity;
+
+    for (const item of enabledCommands) {
+      for (const keyword of item.cmd.keywords) {
+        const kwRunes = Array.from(keyword);
+        const m = fuzzySubseqMatch(qRunes, kwRunes, FUZZY_MAX_GAP);
+        if (!m) continue;
+
+        const kwLen = kwRunes.length;
+        const better =
+          kwLen > bestKeywordLen ||
+          (kwLen === bestKeywordLen && m.inserted < bestInserted) ||
+          (kwLen === bestKeywordLen && m.inserted === bestInserted && item.priority < bestPriority);
+        if (better) {
+          bestKeywordLen = kwLen;
+          bestInserted = m.inserted;
+          bestPriority = item.priority;
+          bestMatch = {
+            command: item.cmd,
+            keyword,
+            argument: qRunes.slice(m.lastIdx + 1).join('').trim(),
+          };
         }
       }
     }
@@ -282,12 +508,17 @@ export class VoiceEngine {
       case 'play_song': {
         const name = result.params.name || '';
         const artist = result.params.artist || '';
-        const searchTerm = name || artist;
-        if (!searchTerm) {
+        if (!name && !artist) {
           songloft.log.warn('[VoiceEngine] [AI] play_song: no name or artist to play');
           return;
         }
-        await this.executePlaySong(searchTerm, accountId, deviceId);
+        // 歌名+歌手都有：歌名作主搜索词、歌手作辅助字段（多字段 cover 匹配）；
+        // 只有其一：用非空者作主搜索词
+        if (name && artist) {
+          await this.executePlaySong(name, accountId, deviceId, artist);
+        } else {
+          await this.executePlaySong(name || artist, accountId, deviceId);
+        }
         break;
       }
       case 'play_playlist': {
@@ -445,9 +676,12 @@ export class VoiceEngine {
    * 通过 IndexingManager 模糊匹配歌曲名，获取所在歌单及索引，然后调用 PlaylistManager 播放
    * 翻译自 Go 版本: voicecmd/engine.go executePlaySong
    */
-  private async executePlaySong(songName: string, accountId: string, deviceId: string): Promise<void> {
+  private async executePlaySong(songName: string, accountId: string, deviceId: string, artist?: string): Promise<void> {
     this.cancelPendingResume();
     const pm = await this.playlistManagerMap.getOrCreate(accountId, deviceId);
+
+    // 本地多字段搜索用歌名+歌手（配合 cover 匹配提升命中）；在线 hint / TTS 文案仍用纯歌名
+    const searchTerm = artist && artist.trim() ? `${songName} ${artist.trim()}` : songName;
 
     // 空参数处理：继续上次播放
     if (!songName) {
@@ -473,11 +707,11 @@ export class VoiceEngine {
     }
 
     // 从索引中模糊匹配歌曲，获取歌单ID和歌曲索引（使用预加载缓存，纯内存操作）
-    songloft.log.info(`[VoiceEngine] Searching song: "${songName}"`);
-    let loc = await this.indexingManager.findSongByName(songName);
+    songloft.log.info(`[VoiceEngine] Searching song: "${searchTerm}"`);
+    let loc = await this.indexingManager.findSongByName(searchTerm);
     if (!loc) {
       // 尝试查找独立远程歌曲（不在任何歌单中的外部导入歌曲）
-      const standalone = await this.indexingManager.findStandaloneSongByName(songName);
+      const standalone = await this.indexingManager.findStandaloneSongByName(searchTerm);
       if (standalone) {
         const playUrl = await URLBuilder.buildSongURL(standalone);
         if (playUrl) {
@@ -495,7 +729,9 @@ export class VoiceEngine {
         await this.minaService.textToSpeech(accountId, deviceId, `未找到歌曲：${songName}`);
         return;
       }
-      const hint = songName.trim() ? { title: songName.trim() } : null;
+      const hint = songName.trim()
+        ? (artist && artist.trim() ? { title: songName.trim(), artist: artist.trim() } : { title: songName.trim() })
+        : null;
       const played = await this.onlineSearcher.searchAndPlay(
         songName, hint, accountId, deviceId, this.minaService,
       );
@@ -530,7 +766,7 @@ export class VoiceEngine {
     if (pm.isLastPlayNotFound()) {
       songloft.log.warn(`[VoiceEngine] Stale playlist ID ${loc.playlistId}, refreshing index and retrying`);
       await this.indexingManager.refresh();
-      const newLoc = await this.indexingManager.findSongByName(songName);
+      const newLoc = await this.indexingManager.findSongByName(searchTerm);
       if (newLoc) {
         songloft.log.info(`[VoiceEngine] Re-matched after refresh: ${newLoc.songTitle} playlist="${newLoc.playlistName}" playlistId=${newLoc.playlistId} songIndex=${newLoc.songIndex}`);
         const retryOk = await pm.play(newLoc.playlistId, newLoc.songIndex, playMode);

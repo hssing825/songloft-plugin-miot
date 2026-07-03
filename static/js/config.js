@@ -4,7 +4,7 @@
  */
 
 const { apiGet, apiPost, apiDelete, getAuthToken } = SongloftPlugin;
-import { showSnackbar } from './utils.js';
+import { showSnackbar, getDeviceId, getAccountId } from './utils.js';
 
 // 对话记录轮询定时器
 let conversationPollTimer = null;
@@ -1216,6 +1216,102 @@ export function initVoiceCommandUI() {
     if (resetBtn) {
         resetBtn.addEventListener('click', resetVoiceCommands);
     }
+
+    // 口令测试按钮
+    initVoiceCommandTest();
+}
+
+/**
+ * 初始化「口令测试」输入框与按钮
+ * 模拟当前所选设备收到一条语音口令，完整匹配+执行并展示诊断信息
+ */
+function initVoiceCommandTest() {
+    const testBtn = document.getElementById('voiceCmdTestBtn');
+    const testInput = document.getElementById('voiceCmdTestInput');
+    const testResult = document.getElementById('voiceCmdTestResult');
+    if (!testBtn || !testInput || !testResult) return;
+
+    const runTest = async () => {
+        const query = testInput.value.trim();
+        if (!query) {
+            testResult.style.display = 'block';
+            testResult.style.color = 'var(--md-error)';
+            testResult.textContent = '请输入要测试的口令';
+            return;
+        }
+
+        const deviceId = getDeviceId();
+        if (!deviceId) return; // getDeviceId 已提示「请先选择设备」
+        const accountId = getAccountId();
+
+        testBtn.disabled = true;
+        testResult.style.display = 'block';
+        testResult.style.color = 'var(--md-on-surface-variant)';
+        testResult.textContent = '执行中...';
+
+        try {
+            const json = await apiPost('/voice-commands/test', {
+                query,
+                device_id: deviceId,
+                account_id: accountId || '',
+            });
+            if (json.success && json.data) {
+                renderVoiceCmdTestResult(testResult, json.data);
+            } else {
+                testResult.style.color = 'var(--md-error)';
+                testResult.textContent = '测试失败: ' + (json.error || '未知错误');
+            }
+        } catch (e) {
+            testResult.style.color = 'var(--md-error)';
+            testResult.textContent = '请求失败: ' + e.message;
+        } finally {
+            testBtn.disabled = false;
+        }
+    };
+
+    testBtn.addEventListener('click', runTest);
+    testInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') runTest();
+    });
+}
+
+/**
+ * 渲染口令测试结果
+ * @param {HTMLElement} el - 结果容器
+ * @param {object} d - CommandTestResult
+ */
+function renderVoiceCmdTestResult(el, d) {
+    const lines = [];
+
+    if (!d.matched) {
+        el.style.color = 'var(--md-error)';
+        lines.push('未匹配到口令');
+        if (d.note) lines.push('说明: ' + d.note);
+        el.textContent = lines.join('\n');
+        return;
+    }
+
+    el.style.color = 'var(--md-primary)';
+    const typeLabel = voiceCommandTypeLabels[d.commandType] || d.commandType || '未知';
+    lines.push('匹配来源: ' + (d.source === 'ai' ? 'AI 分析' : '规则匹配'));
+    lines.push('命令: ' + typeLabel);
+    if (d.keyword) lines.push('命中口令词: ' + d.keyword);
+    if (d.argument) lines.push('搜索参数: ' + d.argument);
+
+    if (d.search) {
+        const kindLabel = d.search.kind === 'playlist' ? '歌单' : '歌曲';
+        const status = d.search.found ? '✅' : '⚠️';
+        lines.push(`${kindLabel}: ${status} ${d.search.detail}`);
+    }
+
+    if (d.ai) {
+        lines.push(`AI: action=${d.ai.action} 置信度=${d.ai.confidence}`);
+    }
+
+    lines.push(d.executed ? '已投放到所选设备执行' : '未执行');
+    if (d.note) lines.push('说明: ' + d.note);
+
+    el.textContent = lines.join('\n');
 }
 
 /**

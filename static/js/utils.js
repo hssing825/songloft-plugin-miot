@@ -104,6 +104,12 @@ export function updateControlState() {
     const playUrlBtn = document.getElementById('playUrlBtn');
     if (playUrlInput) playUrlInput.disabled = !hasDevice;
     if (playUrlBtn) playUrlBtn.disabled = !hasDevice;
+
+    // 文字播报 (TTS) 区域
+    const ttsInput = document.getElementById('ttsInput');
+    const ttsBtn = document.getElementById('ttsBtn');
+    if (ttsInput) ttsInput.disabled = !hasDevice;
+    if (ttsBtn) ttsBtn.disabled = !hasDevice;
 }
 
 /**

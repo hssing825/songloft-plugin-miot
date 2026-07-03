@@ -492,3 +492,44 @@ export function playUrl() {
         }
     });
 }
+
+/**
+ * 让音箱播报指定文字（TTS）
+ */
+export function playTTS() {
+    const accountId = getAccountId();
+    if (!accountId) return;
+    const deviceId = getDeviceId();
+    if (!deviceId) return;
+
+    const ttsInput = document.getElementById('ttsInput');
+    const text = ttsInput ? ttsInput.value.trim() : '';
+    if (!text) {
+        showSnackbar('请输入要播报的文字', 'error');
+        return;
+    }
+
+    showLoading();
+    apiPost('/mina/tts', { account_id: accountId, device_id: deviceId, text: text }).then(data => {
+        hideLoading();
+        showResult(data);
+        if (data.success) {
+            showSnackbar('已开始播报', 'success');
+            if (window.tracely) {
+                window.tracely.reportEvent('tts_play', {});
+            }
+        } else {
+            showSnackbar('播报失败：' + (data.error || data.message || '未知错误'), 'error');
+            if (window.tracely) {
+                window.tracely.reportEvent('api_error', { path: '/mina/tts', error: data.error || data.message || '未知错误' });
+            }
+        }
+    }).catch(error => {
+        hideLoading();
+        showResult({ error: error.message });
+        showSnackbar('播报失败：' + error.message, 'error');
+        if (window.tracely) {
+            window.tracely.reportEvent('api_error', { path: '/mina/tts', error: error.message });
+        }
+    });
+}

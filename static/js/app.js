@@ -20,7 +20,7 @@ window.currentDeviceId = '';
 
 import { updateControlState, clearResult, showSnackbar } from './utils.js';
 import { loadDevices, updateDeviceSelect, confirmDeviceSelection, updateCurrentDeviceCard, toggleDeviceSelectPanel, closeDeviceSelectPanel, selectDevice } from './device.js';
-import { loadPlaylists, loadPlaylistSongs, playPlaylist, playUrl, highlightSongItem, togglePlaylistSelectPanel, closePlaylistSelectPanel, selectPlaylist } from './playlist.js';
+import { loadPlaylists, loadPlaylistSongs, playPlaylist, playUrl, playTTS, highlightSongItem, togglePlaylistSelectPanel, closePlaylistSelectPanel, selectPlaylist } from './playlist.js';
 import {
     playModes,
     previousSong,
@@ -397,6 +397,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const playUrlBtn = document.getElementById('playUrlBtn');
     if (playUrlBtn) {
         playUrlBtn.addEventListener('click', playUrl);
+    }
+
+    const ttsBtn = document.getElementById('ttsBtn');
+    if (ttsBtn) {
+        ttsBtn.addEventListener('click', playTTS);
+    }
+    const ttsInput = document.getElementById('ttsInput');
+    if (ttsInput) {
+        ttsInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') playTTS();
+        });
     }
 
     const clearResultBtn = document.getElementById('clearResultBtn');

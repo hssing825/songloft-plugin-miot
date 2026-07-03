@@ -11,6 +11,7 @@ export interface IndexedSong {
   album: string;
   titleLower: string;   // 小写化用于搜索
   artistLower: string;  // 小写化用于搜索
+  albumLower: string;   // 小写化用于搜索
 }
 
 /** 歌曲在歌单中的位置信息（用于语音口令播放歌曲） */
@@ -37,6 +38,7 @@ interface CachedPlaylistSong {
   artist: string;
   titleLower: string;
   artistLower: string;
+  albumLower: string;
 }
 
 /** 索引状态（字段名使用蛇形式，与 WASM 版保持一致） */
@@ -167,8 +169,8 @@ function fuzzySearchList<T>(
   const queryTrimmed = query.trim();
   if (!queryTrimmed) return [];
 
-  // 分词：按空格分词
-  const terms = queryTrimmed.split(/\s+/).filter(t => t.length > 0);
+  // 分词：按空格与中文标点分词（不分"的"，因其常是歌名/歌单名的一部分）
+  const terms = queryTrimmed.split(/[\s，,、]+/).filter(t => t.length > 0);
   if (terms.length === 0) return [];
 
   const scored: ScoredResult<T>[] = [];
@@ -218,21 +220,22 @@ const MAX_SEARCH_RESULTS = 10;
 const MIN_MATCH_SCORE = 40;
 
 /**
- * 计算歌曲综合匹配得分，联合评估标题和歌手
+ * 计算歌曲综合匹配得分，联合评估标题、歌手与专辑
  *
  * 解决"林俊杰的她说"误匹配已入库歌手"林俊杰"的其他歌曲（如"小酒窝"）的问题：
  * 当查询词仅匹配歌手而标题完全未命中，且查询词明显长于歌手名时
  * （说明用户同时指定了歌名），判定为未命中，返回 0 分。
  */
-function scoreSongMatchLower(queryLower: string, titleLower: string, artistLower: string): number {
+function scoreSongMatchLower(queryLower: string, titleLower: string, artistLower: string, albumLower: string): number {
   const titleScore = fuzzyScoreLower(queryLower, titleLower);
   const artistScore = fuzzyScoreLower(queryLower, artistLower);
+  const albumScore = fuzzyScoreLower(queryLower, albumLower);
 
   if (titleScore >= MIN_MATCH_SCORE) {
     return titleScore;
   }
 
-  if (artistScore >= MIN_MATCH_SCORE && titleScore === 0) {
+  if (artistScore >= MIN_MATCH_SCORE && titleScore === 0 && albumScore === 0) {
     // toLowerCase 不改变 CJK/常见字符的 rune 数，故用 lower 版长度等价于原始长度。
     const queryLen = Array.from(queryLower).length;
     const artistLen = Array.from(artistLower).length;
@@ -241,7 +244,53 @@ function scoreSongMatchLower(queryLower: string, titleLower: string, artistLower
     }
   }
 
-  return Math.max(titleScore, artistScore);
+  return Math.max(titleScore, artistScore, albumScore);
+}
+
+/** 连接词/空白字符集（用于 cover 匹配剔除口语助词） */
+const COVER_CONNECTIVE_RE = /[的和跟与，,、。\s]/g;
+
+/**
+ * 字段覆盖匹配：解决无空格中文"歌手+歌名"组合（如"周杰伦晴天"、"周杰伦的晴天"）。
+ *
+ * 不对 query 做中文分词，而是反向用歌曲自身字段去"覆盖"query：按字段 rune 长度降序
+ * （长字段先吃，避免短字段误吃子串），若字段值是剩余串的连续子串则抠掉该次出现并计数；
+ * 最后剔除连接词/空白后，命中 ≥2 个字段且几乎无剩余则判为强匹配。
+ *
+ * @returns 95（完全覆盖）/ 80（剩 1 字）/ 0（不足两字段覆盖，交由 whole 路径处理单字段）
+ */
+function coverScore(queryLower: string, fieldsLower: string[]): number {
+  const fields = fieldsLower
+    .filter(f => Array.from(f).length >= 2)
+    .sort((a, b) => Array.from(b).length - Array.from(a).length);
+  if (fields.length < 2) return 0;
+
+  let rem = queryLower;
+  let matched = 0;
+  for (const f of fields) {
+    const idx = rem.indexOf(f);
+    if (idx >= 0) {
+      rem = rem.slice(0, idx) + rem.slice(idx + f.length);
+      matched++;
+    }
+  }
+  if (matched < 2) return 0;
+
+  const rem2Len = Array.from(rem.replace(COVER_CONNECTIVE_RE, '')).length;
+  if (rem2Len === 0) return 95;
+  if (rem2Len <= 1) return 80;
+  return 0;
+}
+
+/**
+ * 歌曲综合评分：取"整词多字段评分"与"字段覆盖评分"的较高者。
+ * whole 处理单字段命中（歌名/歌手/专辑），cover 处理无空格的多字段组合。
+ */
+function scoreSong(queryLower: string, titleLower: string, artistLower: string, albumLower: string): number {
+  return Math.max(
+    scoreSongMatchLower(queryLower, titleLower, artistLower, albumLower),
+    coverScore(queryLower, [titleLower, artistLower, albumLower]),
+  );
 }
 
 /**
@@ -301,6 +350,7 @@ export class IndexingManager {
         album: song.album ?? '',
         titleLower: (song.title ?? '').toLowerCase(),
         artistLower: (song.artist ?? '').toLowerCase(),
+        albumLower: (song.album ?? '').toLowerCase(),
       }));
 
       // 5. 预加载歌单歌曲（避免搜歌时逐个桥接调用）。
@@ -313,12 +363,14 @@ export class IndexingManager {
           newPlaylistSongsCache.set(pl.id, plSongs.map(s => {
             const title = (s as any).title ?? '';
             const artist = (s as any).artist ?? '';
+            const album = (s as any).album ?? '';
             return {
               id: s.id,
               title,
               artist,
               titleLower: title.toLowerCase(),
               artistLower: artist.toLowerCase(),
+              albumLower: album.toLowerCase(),
             };
           }));
         } catch (e) {
@@ -388,7 +440,7 @@ export class IndexingManager {
     const scored: ScoredResult<IndexedSong>[] = [];
 
     for (const song of this.songs) {
-      const score = scoreSongMatchLower(queryLower, song.titleLower, song.artistLower);
+      const score = scoreSong(queryLower, song.titleLower, song.artistLower, song.albumLower);
       if (score > 0) {
         scored.push({ item: song, score });
       }
@@ -502,8 +554,8 @@ export class IndexingManager {
           });
         }
 
-        // b) 直接模糊评分（联合标题+歌手）
-        const score = scoreSongMatchLower(queryLower, s.titleLower, s.artistLower);
+        // b) 直接模糊评分（联合标题+歌手+专辑）
+        const score = scoreSong(queryLower, s.titleLower, s.artistLower, s.albumLower);
         if (score >= MIN_MATCH_SCORE && score > bestDirectScore) {
           bestDirectScore = score;
           bestDirectLoc = {
@@ -531,7 +583,7 @@ export class IndexingManager {
     // 4a. 全局索引有高质量命中但不在任何歌单中 → 返回 null 让调用方走独立歌曲路径
     if (matchedSongs.length > 0) {
       const bestGlobal = matchedSongs[0];
-      const bestGlobalScore = scoreSongMatchLower(queryLower, bestGlobal.titleLower, bestGlobal.artistLower);
+      const bestGlobalScore = scoreSong(queryLower, bestGlobal.titleLower, bestGlobal.artistLower, bestGlobal.albumLower);
       if (bestGlobalScore >= MIN_MATCH_SCORE) {
         songloft.log.info(
           `[IndexingManager] findSongByName done (${elapsedMs}ms) → global match "${bestGlobal.title}" by "${bestGlobal.artist}" (score=${bestGlobalScore.toFixed(1)}) not in any playlist, deferring to standalone`
@@ -566,7 +618,7 @@ export class IndexingManager {
     const matched = this.searchSong(songName);
     if (matched.length === 0) return null;
 
-    const bestScore = scoreSongMatchLower(songName.toLowerCase(), matched[0].titleLower, matched[0].artistLower);
+    const bestScore = scoreSong(songName.toLowerCase(), matched[0].titleLower, matched[0].artistLower, matched[0].albumLower);
     if (bestScore < MIN_MATCH_SCORE) {
       songloft.log.info(`[IndexingManager] findStandaloneSongByName: best match "${matched[0].title}" by "${matched[0].artist}" score=${bestScore.toFixed(1)} below threshold, skipping`);
       return null;

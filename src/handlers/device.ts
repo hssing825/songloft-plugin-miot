@@ -116,6 +116,27 @@ export function registerDeviceHandlers(
     }
   });
 
+  // POST /mina/tts - 让音箱播报指定文字（TTS）
+  router.post('/mina/tts', async (req: HTTPRequest) => {
+    try {
+      const body = parseBody(req);
+      const { account_id, device_id, text } = body;
+      if (!account_id) {
+        return jsonResponse({ success: false, error: 'account_id is required' });
+      }
+      if (!device_id || !text) {
+        return jsonResponse({ success: false, error: 'device_id and text are required' });
+      }
+      const ok = await minaService.textToSpeech(account_id, device_id, text);
+      if (!ok) {
+        return jsonResponse({ success: false, error: 'failed to play tts' });
+      }
+      return jsonResponse({ success: true, data: { message: 'tts playing' } });
+    } catch (e: any) {
+      return jsonResponse({ success: false, error: e.message || String(e) });
+    }
+  });
+
   // POST /mina/pause - 暂停播放
   router.post('/mina/pause', async (req: HTTPRequest) => {
     try {

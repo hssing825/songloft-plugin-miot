@@ -5,6 +5,7 @@ import { jsonResponse } from '@songloft/plugin-sdk';
 import type { Router, HTTPRequest } from '@songloft/plugin-sdk';
 import { ConfigManager } from '../config/manager';
 import { AIAnalyzer } from '../voicecmd/ai_analyzer';
+import { VoiceEngine } from '../voicecmd/engine';
 
 /** 解析请求体（兼容 Uint8Array 和 string） */
 function parseBody(req: HTTPRequest): any {
@@ -24,10 +25,12 @@ function parseBody(req: HTTPRequest): any {
  * GET  /voice-commands → 获取语音口令配置
  * POST /voice-commands → 设置语音口令配置
  * POST /voice-commands/ai-test → 测试 AI 口令分析
+ * POST /voice-commands/test → 模拟语音口令（完整匹配+执行）并返回诊断
  */
 export function registerVoiceCommandHandlers(
   router: Router,
   configManager: ConfigManager,
+  voiceEngine: VoiceEngine,
 ): void {
 
   // GET /voice-commands - 获取语音口令配置
@@ -80,6 +83,28 @@ export function registerVoiceCommandHandlers(
       aiConfig.enabled = true;
       const analyzer = new AIAnalyzer();
       const result = await analyzer.analyze(query, aiConfig);
+      return jsonResponse({ success: true, data: result });
+    } catch (e: any) {
+      return jsonResponse({ success: false, error: e.message || String(e) });
+    }
+  });
+
+  // POST /voice-commands/test - 模拟语音口令（完整匹配+执行）
+  router.post('/voice-commands/test', async (req: HTTPRequest) => {
+    try {
+      const body = parseBody(req);
+      const query = body.query as string | undefined;
+      const deviceId = body.device_id as string | undefined;
+      const accountId = body.account_id as string | undefined;
+
+      if (!query || typeof query !== 'string' || !query.trim()) {
+        return jsonResponse({ success: false, error: 'query is required' });
+      }
+      if (!deviceId || typeof deviceId !== 'string') {
+        return jsonResponse({ success: false, error: 'device_id is required（请先选择设备）' });
+      }
+
+      const result = await voiceEngine.testCommand(query, deviceId, accountId);
       return jsonResponse({ success: true, data: result });
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
