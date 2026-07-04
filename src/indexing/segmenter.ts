@@ -10,6 +10,7 @@ import { pinyin } from 'pinyin-pro';
 
 // segmentit 单例：懒初始化，累积加载通用词典 + 曲库自建词典
 let segInstance: Segment | null = null;
+const loadedDomainWords = new Set<string>();
 
 function getSegment(): Segment {
   if (!segInstance) {
@@ -35,28 +36,33 @@ const EXTRA_STOPWORDS = new Set<string>([
 
 /**
  * 把曲库词汇注入分词器自定义词典，让冷门歌名/歌手（如「孤勇者」「單依純」）正确成词。
- * segmentit loadDict 行格式：`词|词性|词频`。每次索引刷新调用；词典按词去重累积（幂等）。
- * @param words - title/artist/album 原始值集合（可含重复）
+ * segmentit loadDict 行格式：`词|词性|词频`。每次索引刷新调用；词典按全局去重累积（幂等）。
+ * @param words - title/artist/playlist 原始值集合（可含重复）
+ * @param maxWords - 单次最多注入的新词数量，避免大曲库刷新时长时间占用 QuickJS
+ * @returns 实际注入的新词数量
  */
-export function loadDomainDict(words: string[]): void {
+export function loadDomainDict(words: string[], maxWords = 3000): number {
   const seg = getSegment();
   const posNoun = POSTAG.D_N; // 名词
-  const seen = new Set<string>();
+  const seenInBatch = new Set<string>();
   const lines: string[] = [];
 
   for (const raw of words) {
+    if (lines.length >= maxWords) break;
     const w = (raw || '').trim();
     // 单字不注入（噪声）；含分隔符/换行会破坏 loadDict 行格式，跳过
     if (w.length < 2) continue;
     if (w.includes('|') || w.includes('\n') || w.includes('\r')) continue;
-    if (seen.has(w)) continue;
-    seen.add(w);
+    if (seenInBatch.has(w) || loadedDomainWords.has(w)) continue;
+    seenInBatch.add(w);
+    loadedDomainWords.add(w);
     lines.push(`${w}|${posNoun}|100`);
   }
 
   if (lines.length > 0) {
     seg.loadDict(lines.join('\n'));
   }
+  return lines.length;
 }
 
 /**

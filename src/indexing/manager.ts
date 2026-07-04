@@ -43,6 +43,7 @@ interface CachedPlaylistSong {
   id: number;
   title: string;
   artist: string;
+  album: string;
   titleLower: string;
   artistLower: string;
   albumLower: string;
@@ -235,16 +236,63 @@ const FIELD_WEIGHT = { title: 1.0, artist: 0.85, album: 0.7 } as const;
 /** 单 token 参与拼音/编辑距离模糊匹配的最小 rune 长度（单字太短，同音/编辑噪声高） */
 const TOKEN_FUZZY_MIN_LEN = 2;
 
+/** 轻量索引构建分片大小：只做字段整理/小写，批量让出 QuickJS VM。 */
+const LIGHT_INDEX_BATCH_SIZE = 300;
+
+/** 拼音增强分片大小：toPinyin 在低配 ARM 上较重，分片更细。 */
+const PINYIN_ENHANCE_BATCH_SIZE = 100;
+
+/** 歌单歌曲预拉并发数，避免一次性 Promise.all 压垮低配机器。 */
+const PLAYLIST_FETCH_CONCURRENCY = 3;
+
+/** 领域词典只注入 title/artist/playlist，且限制单次新增词数。 */
+const DOMAIN_DICT_LIMIT = 3000;
+
+/** 独立歌曲 miss 后的全量刷新冷却，避免每条未命中口令都重建索引。 */
+const STANDALONE_REFRESH_COOLDOWN_MS = 60_000;
+
+/** 进程内拼音缓存：跨 refresh 复用，避免同一歌手/歌名反复转拼音。 */
+const PINYIN_CACHE_LIMIT = 20000;
+const pinyinCache = new Map<string, string>();
+
 /** query 分词结果（token + 预转拼音，len<2 的 token 拼音留空不参与拼音匹配） */
 interface QueryTokens {
   tokens: string[];
   pys: string[];
 }
 
+function yieldToRuntime(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+function rememberPinyin(key: string, value: string): void {
+  if (pinyinCache.size >= PINYIN_CACHE_LIMIT) {
+    const oldest = pinyinCache.keys().next().value;
+    if (oldest !== undefined) {
+      pinyinCache.delete(oldest);
+    }
+  }
+  pinyinCache.set(key, value);
+}
+
+function getCachedPinyin(text: string): string {
+  const key = (text || '').trim();
+  if (!key) return '';
+
+  const cached = pinyinCache.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const value = toPinyin(key);
+  rememberPinyin(key, value);
+  return value;
+}
+
 /** 对 query 分词并预算每个 token 的拼音，供跨字段匹配复用（每次搜索算一次） */
 function tokenizeQuery(query: string): QueryTokens {
   const tokens = segmentQuery(query);
-  const pys = tokens.map(t => (Array.from(t).length >= TOKEN_FUZZY_MIN_LEN ? toPinyin(t) : ''));
+  const pys = tokens.map(t => (Array.from(t).length >= TOKEN_FUZZY_MIN_LEN ? getCachedPinyin(t) : ''));
   return { tokens, pys };
 }
 
@@ -333,9 +381,173 @@ export class IndexingManager {
   private lastRefreshTime: number = 0;
   private isRefreshing: boolean = false;
   private indexReady: boolean = false;
+  private refreshGeneration: number = 0;
+  private lastStandaloneRefreshTime: number = 0;
 
   constructor(configManager?: import('../config/manager').ConfigManager) {
     this.configManager = configManager ?? null;
+  }
+
+  private async buildSongIndex(rawSongs: any[]): Promise<IndexedSong[]> {
+    const out: IndexedSong[] = [];
+    for (let i = 0; i < rawSongs.length; i++) {
+      const song = rawSongs[i];
+      const title = song.title ?? '';
+      const artist = song.artist ?? '';
+      const album = song.album ?? '';
+      out.push({
+        id: song.id,
+        title,
+        artist,
+        album,
+        titleLower: title.toLowerCase(),
+        artistLower: artist.toLowerCase(),
+        albumLower: album.toLowerCase(),
+        titlePinyin: '',
+        artistPinyin: '',
+        albumPinyin: '',
+      });
+
+      if (i > 0 && i % LIGHT_INDEX_BATCH_SIZE === 0) {
+        await yieldToRuntime();
+      }
+    }
+    return out;
+  }
+
+  private async buildCachedPlaylistSongs(rawSongs: any[]): Promise<CachedPlaylistSong[]> {
+    const out: CachedPlaylistSong[] = [];
+    for (let i = 0; i < rawSongs.length; i++) {
+      const s = rawSongs[i];
+      const title = (s as any).title ?? '';
+      const artist = (s as any).artist ?? '';
+      const album = (s as any).album ?? '';
+      out.push({
+        id: s.id,
+        title,
+        artist,
+        album,
+        titleLower: title.toLowerCase(),
+        artistLower: artist.toLowerCase(),
+        albumLower: album.toLowerCase(),
+        titlePinyin: '',
+        artistPinyin: '',
+        albumPinyin: '',
+      });
+
+      if (i > 0 && i % LIGHT_INDEX_BATCH_SIZE === 0) {
+        await yieldToRuntime();
+      }
+    }
+    return out;
+  }
+
+  private async fetchPlaylistSongsCache(playlists: IndexedPlaylist[]): Promise<Map<number, CachedPlaylistSong[]>> {
+    const cache = new Map<number, CachedPlaylistSong[]>();
+    let next = 0;
+    const workerCount = Math.min(PLAYLIST_FETCH_CONCURRENCY, Math.max(1, playlists.length));
+
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const idx = next++;
+        if (idx >= playlists.length) return;
+
+        const pl = playlists[idx];
+        try {
+          const plSongs = (await songloft.playlists.getSongs(pl.id, { limit: 100000 })) ?? [];
+          cache.set(pl.id, await this.buildCachedPlaylistSongs(plSongs));
+        } catch (e) {
+          songloft.log.warn(`索引刷新: 获取歌单歌曲失败 playlist_id=${pl.id}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        await yieldToRuntime();
+      }
+    };
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return cache;
+  }
+
+  private startBackgroundEnhancement(
+    generation: number,
+    songs: IndexedSong[],
+    playlists: IndexedPlaylist[],
+    playlistSongsCache: Map<number, CachedPlaylistSong[]>,
+  ): void {
+    this.enhanceIndexInBackground(generation, songs, playlists, playlistSongsCache).catch(e => {
+      songloft.log.warn(`索引后台增强失败: ${e instanceof Error ? e.message : String(e)}`);
+    });
+  }
+
+  private async enhanceIndexInBackground(
+    generation: number,
+    songs: IndexedSong[],
+    playlists: IndexedPlaylist[],
+    playlistSongsCache: Map<number, CachedPlaylistSong[]>,
+  ): Promise<void> {
+    const start = Date.now();
+    await this.enhanceSongPinyin(generation, songs);
+    await this.enhancePlaylistSongPinyin(generation, playlistSongsCache);
+    if (generation !== this.refreshGeneration) return;
+
+    const words = this.collectDomainWords(songs, playlists);
+    const injected = loadDomainDict(words, DOMAIN_DICT_LIMIT);
+    songloft.log.info(`索引后台增强完成: pinyinCache=${pinyinCache.size} domainWords=${injected} (${Date.now() - start}ms)`);
+  }
+
+  private async enhanceSongPinyin(generation: number, songs: IndexedSong[]): Promise<void> {
+    for (let i = 0; i < songs.length; i++) {
+      if (generation !== this.refreshGeneration) return;
+      const s = songs[i];
+      s.titlePinyin = getCachedPinyin(s.title);
+      s.artistPinyin = getCachedPinyin(s.artist);
+      s.albumPinyin = getCachedPinyin(s.album);
+
+      if (i > 0 && i % PINYIN_ENHANCE_BATCH_SIZE === 0) {
+        await yieldToRuntime();
+      }
+    }
+  }
+
+  private async enhancePlaylistSongPinyin(
+    generation: number,
+    playlistSongsCache: Map<number, CachedPlaylistSong[]>,
+  ): Promise<void> {
+    for (const songs of playlistSongsCache.values()) {
+      for (let i = 0; i < songs.length; i++) {
+        if (generation !== this.refreshGeneration) return;
+        const s = songs[i];
+        s.titlePinyin = getCachedPinyin(s.title);
+        s.artistPinyin = getCachedPinyin(s.artist);
+        s.albumPinyin = getCachedPinyin(s.album);
+
+        if (i > 0 && i % PINYIN_ENHANCE_BATCH_SIZE === 0) {
+          await yieldToRuntime();
+        }
+      }
+      await yieldToRuntime();
+    }
+  }
+
+  private collectDomainWords(songs: IndexedSong[], playlists: IndexedPlaylist[]): string[] {
+    const words: string[] = [];
+    const seen = new Set<string>();
+    const add = (word: string): void => {
+      const w = (word || '').trim();
+      if (!w || seen.has(w)) return;
+      seen.add(w);
+      words.push(w);
+    };
+
+    for (const s of songs) {
+      if (words.length >= DOMAIN_DICT_LIMIT) break;
+      add(s.title);
+      add(s.artist);
+    }
+    for (const pl of playlists) {
+      if (words.length >= DOMAIN_DICT_LIMIT) break;
+      add(pl.name);
+    }
+    return words;
   }
 
   /**
@@ -349,6 +561,8 @@ export class IndexingManager {
 
     this.isRefreshing = true;
     try {
+      const generation = this.refreshGeneration + 1;
+
       // 1. 获取歌单列表（桥接直接返回数组）
       const rawPlaylists = (await songloft.playlists.list()) ?? [];
 
@@ -362,103 +576,38 @@ export class IndexingManager {
       }
       const rawSongs = (await songloft.songs.list({ limit: songLimit })) ?? [];
 
-      // 3. 构建歌单索引
+      // 3. 构建轻量歌单/歌曲索引。这里只做字段整理与小写化，确保低配机器先 ready。
       const newPlaylists: IndexedPlaylist[] = rawPlaylists.map(pl => ({
         id: pl.id,
         name: pl.name,
         nameLower: pl.name.toLowerCase(),
         songCount: (pl as any).song_count ?? (pl as any).songCount ?? 0,
       }));
+      const newSongs = await this.buildSongIndex(rawSongs);
 
-      // 拼音去重缓存：大量歌曲共享同一歌手/专辑，避免重复计算
-      const pyCache = new Map<string, string>();
-      const py = (s: string): string => {
-        if (!s) return '';
-        let v = pyCache.get(s);
-        if (v === undefined) {
-          v = toPinyin(s);
-          pyCache.set(s, v);
-        }
-        return v;
-      };
-
-      // 4. 构建歌曲索引（同时预计算拼音，供同音字匹配）
-      const newSongs: IndexedSong[] = rawSongs.map(song => {
-        const title = song.title ?? '';
-        const artist = song.artist ?? '';
-        const album = song.album ?? '';
-        return {
-          id: song.id,
-          title,
-          artist,
-          album,
-          titleLower: title.toLowerCase(),
-          artistLower: artist.toLowerCase(),
-          albumLower: album.toLowerCase(),
-          titlePinyin: py(title),
-          artistPinyin: py(artist),
-          albumPinyin: py(album),
-        };
-      });
-
-      // 4.5 把曲库词汇注入分词器自定义词典，让冷门歌名/歌手正确成词
-      const domainWords: string[] = [];
-      for (const s of newSongs) {
-        if (s.title) domainWords.push(s.title);
-        if (s.artist) domainWords.push(s.artist);
-        if (s.album) domainWords.push(s.album);
-      }
-      for (const pl of newPlaylists) {
-        if (pl.name) domainWords.push(pl.name);
-      }
-      try {
-        loadDomainDict(domainWords);
-      } catch (e) {
-        songloft.log.warn(`索引刷新: 注入曲库词典失败: ${e instanceof Error ? e.message : String(e)}`);
-      }
-
-      // 5. 预加载歌单歌曲（避免搜歌时逐个桥接调用）。
-      //    并发拉取所有歌单，单歌单失败仅 warn 不中断整体。
-      const newPlaylistSongsCache = new Map<number, CachedPlaylistSong[]>();
+      // 4. 预加载歌单歌曲（避免搜歌时逐个桥接调用），但用小并发池而不是无界 Promise.all。
       const plSongsStart = Date.now();
-      await Promise.all(newPlaylists.map(async pl => {
-        try {
-          const plSongs = (await songloft.playlists.getSongs(pl.id, { limit: 100000 })) ?? [];
-          newPlaylistSongsCache.set(pl.id, plSongs.map(s => {
-            const title = (s as any).title ?? '';
-            const artist = (s as any).artist ?? '';
-            const album = (s as any).album ?? '';
-            return {
-              id: s.id,
-              title,
-              artist,
-              titleLower: title.toLowerCase(),
-              artistLower: artist.toLowerCase(),
-              albumLower: album.toLowerCase(),
-              titlePinyin: py(title),
-              artistPinyin: py(artist),
-              albumPinyin: py(album),
-            };
-          }));
-        } catch (e) {
-          songloft.log.warn(`索引刷新: 获取歌单歌曲失败 playlist_id=${pl.id}: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }));
+      const newPlaylistSongsCache = await this.fetchPlaylistSongsCache(newPlaylists);
       const plSongsMs = Date.now() - plSongsStart;
 
-      // 6. 更新索引
+      // 5. 更新轻量索引并立即 ready；拼音与分词词典在后台分片增强。
+      this.refreshGeneration = generation;
       this.playlists = newPlaylists;
       this.songs = newSongs;
       this.playlistSongsCache = newPlaylistSongsCache;
       this.lastRefreshTime = Date.now();
       this.indexReady = true;
 
-      songloft.log.info(`索引构建完成: playlists=${newPlaylists.length} songs=${newSongs.length} playlistSongs=${newPlaylistSongsCache.size} (${plSongsMs}ms)`);
+      this.startBackgroundEnhancement(generation, newSongs, newPlaylists, newPlaylistSongsCache);
+
+      songloft.log.info(`轻量索引构建完成: playlists=${newPlaylists.length} songs=${newSongs.length} playlistSongs=${newPlaylistSongsCache.size} (${plSongsMs}ms), 后台增强已启动`);
       return { success: true, songCount: newSongs.length, playlistCount: newPlaylists.length };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       songloft.log.warn(`索引刷新失败: ${msg}`);
-      this.indexReady = false;
+      if (this.songs.length === 0 && this.playlists.length === 0) {
+        this.indexReady = false;
+      }
       return { success: false, songCount: this.songs.length, playlistCount: this.playlists.length };
     } finally {
       this.isRefreshing = false;
@@ -692,8 +841,15 @@ export class IndexingManager {
   async findStandaloneSongByName(songName: string): Promise<{ id: number; url: string; title: string; artist: string } | null> {
     if (!songName) return null;
 
-    // 刷新索引确保包含最新导入的远程歌曲
-    await this.refresh();
+    // 独立远程歌曲可能刚由外部搜索导入，但全量刷新很重；加冷却避免连续 miss 拖垮低配机。
+    const now = Date.now();
+    if (!this.isRefreshing && now - this.lastStandaloneRefreshTime >= STANDALONE_REFRESH_COOLDOWN_MS) {
+      this.lastStandaloneRefreshTime = now;
+      await this.refresh();
+    } else {
+      const remainingMs = Math.max(0, STANDALONE_REFRESH_COOLDOWN_MS - (now - this.lastStandaloneRefreshTime));
+      songloft.log.info(`[IndexingManager] findStandaloneSongByName: skip refresh (refreshing=${this.isRefreshing}, cooldown=${remainingMs}ms)`);
+    }
 
     // 在刷新后的索引中按 title 模糊匹配
     const matched = this.searchSong(songName);
