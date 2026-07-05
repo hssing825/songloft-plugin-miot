@@ -3,7 +3,7 @@
 
 /// <reference types="@songloft/plugin-sdk" />
 
-import { loadDomainDict, segmentQuery, toPinyin } from './segmenter';
+import { segmentQuery, toPinyin } from './segmenter';
 
 // ===== 类型定义 =====
 
@@ -60,6 +60,8 @@ export interface IndexStatus {
   last_refresh_time: string;
   is_refreshing: boolean;
 }
+
+type RefreshResult = { success: boolean; songCount: number; playlistCount: number };
 
 /** 模糊搜索评分结果（内部使用） */
 interface ScoredResult<T> {
@@ -239,14 +241,8 @@ const TOKEN_FUZZY_MIN_LEN = 2;
 /** 轻量索引构建分片大小：只做字段整理/小写，批量让出 QuickJS VM。 */
 const LIGHT_INDEX_BATCH_SIZE = 300;
 
-/** 拼音增强分片大小：toPinyin 在低配 ARM 上较重，分片更细。 */
-const PINYIN_ENHANCE_BATCH_SIZE = 100;
-
 /** 歌单歌曲预拉并发数，避免一次性 Promise.all 压垮低配机器。 */
 const PLAYLIST_FETCH_CONCURRENCY = 3;
-
-/** 领域词典只注入 title/artist/playlist，且限制单次新增词数。 */
-const DOMAIN_DICT_LIMIT = 3000;
 
 /** 独立歌曲 miss 后的全量刷新冷却，避免每条未命中口令都重建索引。 */
 const STANDALONE_REFRESH_COOLDOWN_MS = 60_000;
@@ -263,6 +259,10 @@ interface QueryTokens {
 
 function yieldToRuntime(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function rememberPinyin(key: string, value: string): void {
@@ -383,6 +383,7 @@ export class IndexingManager {
   private indexReady: boolean = false;
   private refreshGeneration: number = 0;
   private lastStandaloneRefreshTime: number = 0;
+  private pendingRefreshPromise: Promise<RefreshResult> | null = null;
 
   constructor(configManager?: import('../config/manager').ConfigManager) {
     this.configManager = configManager ?? null;
@@ -403,9 +404,9 @@ export class IndexingManager {
         titleLower: title.toLowerCase(),
         artistLower: artist.toLowerCase(),
         albumLower: album.toLowerCase(),
-        titlePinyin: '',
-        artistPinyin: '',
-        albumPinyin: '',
+        titlePinyin: getCachedPinyin(title),
+        artistPinyin: getCachedPinyin(artist),
+        albumPinyin: getCachedPinyin(album),
       });
 
       if (i > 0 && i % LIGHT_INDEX_BATCH_SIZE === 0) {
@@ -430,9 +431,9 @@ export class IndexingManager {
         titleLower: title.toLowerCase(),
         artistLower: artist.toLowerCase(),
         albumLower: album.toLowerCase(),
-        titlePinyin: '',
-        artistPinyin: '',
-        albumPinyin: '',
+        titlePinyin: getCachedPinyin(title),
+        artistPinyin: getCachedPinyin(artist),
+        albumPinyin: getCachedPinyin(album),
       });
 
       if (i > 0 && i % LIGHT_INDEX_BATCH_SIZE === 0) {
@@ -467,98 +468,49 @@ export class IndexingManager {
     return cache;
   }
 
-  private startBackgroundEnhancement(
+  private startBackgroundPlaylistCache(
     generation: number,
-    songs: IndexedSong[],
     playlists: IndexedPlaylist[],
-    playlistSongsCache: Map<number, CachedPlaylistSong[]>,
   ): void {
-    this.enhanceIndexInBackground(generation, songs, playlists, playlistSongsCache).catch(e => {
-      songloft.log.warn(`索引后台增强失败: ${e instanceof Error ? e.message : String(e)}`);
+    this.replacePlaylistSongsCacheInBackground(generation, playlists).catch(e => {
+      songloft.log.warn(`歌单歌曲缓存后台加载失败: ${e instanceof Error ? e.message : String(e)}`);
     });
   }
 
-  private async enhanceIndexInBackground(
+  private async replacePlaylistSongsCacheInBackground(
     generation: number,
-    songs: IndexedSong[],
     playlists: IndexedPlaylist[],
-    playlistSongsCache: Map<number, CachedPlaylistSong[]>,
   ): Promise<void> {
     const start = Date.now();
-    await this.enhanceSongPinyin(generation, songs);
-    await this.enhancePlaylistSongPinyin(generation, playlistSongsCache);
-    if (generation !== this.refreshGeneration) return;
-
-    const words = this.collectDomainWords(songs, playlists);
-    const injected = loadDomainDict(words, DOMAIN_DICT_LIMIT);
-    songloft.log.info(`索引后台增强完成: pinyinCache=${pinyinCache.size} domainWords=${injected} (${Date.now() - start}ms)`);
-  }
-
-  private async enhanceSongPinyin(generation: number, songs: IndexedSong[]): Promise<void> {
-    for (let i = 0; i < songs.length; i++) {
-      if (generation !== this.refreshGeneration) return;
-      const s = songs[i];
-      s.titlePinyin = getCachedPinyin(s.title);
-      s.artistPinyin = getCachedPinyin(s.artist);
-      s.albumPinyin = getCachedPinyin(s.album);
-
-      if (i > 0 && i % PINYIN_ENHANCE_BATCH_SIZE === 0) {
-        await yieldToRuntime();
-      }
+    const cache = await this.fetchPlaylistSongsCache(playlists);
+    if (generation !== this.refreshGeneration) {
+      return;
     }
-  }
-
-  private async enhancePlaylistSongPinyin(
-    generation: number,
-    playlistSongsCache: Map<number, CachedPlaylistSong[]>,
-  ): Promise<void> {
-    for (const songs of playlistSongsCache.values()) {
-      for (let i = 0; i < songs.length; i++) {
-        if (generation !== this.refreshGeneration) return;
-        const s = songs[i];
-        s.titlePinyin = getCachedPinyin(s.title);
-        s.artistPinyin = getCachedPinyin(s.artist);
-        s.albumPinyin = getCachedPinyin(s.album);
-
-        if (i > 0 && i % PINYIN_ENHANCE_BATCH_SIZE === 0) {
-          await yieldToRuntime();
-        }
-      }
-      await yieldToRuntime();
-    }
-  }
-
-  private collectDomainWords(songs: IndexedSong[], playlists: IndexedPlaylist[]): string[] {
-    const words: string[] = [];
-    const seen = new Set<string>();
-    const add = (word: string): void => {
-      const w = (word || '').trim();
-      if (!w || seen.has(w)) return;
-      seen.add(w);
-      words.push(w);
-    };
-
-    for (const s of songs) {
-      if (words.length >= DOMAIN_DICT_LIMIT) break;
-      add(s.title);
-      add(s.artist);
-    }
-    for (const pl of playlists) {
-      if (words.length >= DOMAIN_DICT_LIMIT) break;
-      add(pl.name);
-    }
-    return words;
+    this.playlistSongsCache = cache;
+    songloft.log.info(`歌单歌曲缓存后台加载完成: playlists=${cache.size} pinyinCache=${pinyinCache.size} (${Date.now() - start}ms)`);
   }
 
   /**
    * 刷新索引（从宿主API获取最新数据）
    * @returns 刷新结果
    */
-  async refresh(): Promise<{ success: boolean; songCount: number; playlistCount: number }> {
-    if (this.isRefreshing) {
-      return { success: false, songCount: this.songs.length, playlistCount: this.playlists.length };
+  async refresh(): Promise<RefreshResult> {
+    if (this.pendingRefreshPromise) {
+      return this.pendingRefreshPromise;
     }
 
+    const promise = this.doRefresh();
+    this.pendingRefreshPromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (this.pendingRefreshPromise === promise) {
+        this.pendingRefreshPromise = null;
+      }
+    }
+  }
+
+  private async doRefresh(): Promise<RefreshResult> {
     this.isRefreshing = true;
     try {
       const generation = this.refreshGeneration + 1;
@@ -585,22 +537,16 @@ export class IndexingManager {
       }));
       const newSongs = await this.buildSongIndex(rawSongs);
 
-      // 4. 预加载歌单歌曲（避免搜歌时逐个桥接调用），但用小并发池而不是无界 Promise.all。
-      const plSongsStart = Date.now();
-      const newPlaylistSongsCache = await this.fetchPlaylistSongsCache(newPlaylists);
-      const plSongsMs = Date.now() - plSongsStart;
-
-      // 5. 更新轻量索引并立即 ready；拼音与分词词典在后台分片增强。
+      // 4. 歌曲列表到达后立即 ready；歌单歌曲缓存改为后台加载，避免低配设备长时间阻塞。
       this.refreshGeneration = generation;
       this.playlists = newPlaylists;
       this.songs = newSongs;
-      this.playlistSongsCache = newPlaylistSongsCache;
       this.lastRefreshTime = Date.now();
       this.indexReady = true;
 
-      this.startBackgroundEnhancement(generation, newSongs, newPlaylists, newPlaylistSongsCache);
+      this.startBackgroundPlaylistCache(generation, newPlaylists);
 
-      songloft.log.info(`轻量索引构建完成: playlists=${newPlaylists.length} songs=${newSongs.length} playlistSongs=${newPlaylistSongsCache.size} (${plSongsMs}ms), 后台增强已启动`);
+      songloft.log.info(`轻量索引构建完成: playlists=${newPlaylists.length} songs=${newSongs.length}, 歌单歌曲缓存后台加载已启动`);
       return { success: true, songCount: newSongs.length, playlistCount: newPlaylists.length };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -612,6 +558,24 @@ export class IndexingManager {
     } finally {
       this.isRefreshing = false;
     }
+  }
+
+  async waitForReady(timeoutMs = 5000): Promise<boolean> {
+    if (this.indexReady) {
+      return true;
+    }
+
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    if (!this.pendingRefreshPromise) {
+      void this.refresh();
+    }
+
+    while (!this.indexReady && Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      await sleep(Math.min(100, Math.max(1, remaining)));
+    }
+
+    return this.indexReady;
   }
 
   /**

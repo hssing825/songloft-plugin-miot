@@ -78,6 +78,9 @@ const FUZZY_MAX_GAP = 4;
 /** 跳字模糊匹配：关键词最小 rune 长度（2 字以内控制词如"停止/切歌"不参与，避免误触发） */
 const FUZZY_MIN_KEYWORD_LEN = 3;
 
+/** 语音请求到达时给后台索引刷新的短等待窗口。 */
+const INDEX_READY_WAIT_MS = 5000;
+
 /**
  * 有界跳字子序列匹配：在 query 的 rune 数组中按序查找关键词，允许中间插入有限字符。
  *
@@ -339,7 +342,7 @@ export class VoiceEngine {
       if (!term.trim()) {
         return { kind: 'song', found: false, detail: '（无歌名，将恢复上次播放）' };
       }
-      if (!this.indexingManager.isIndexReady()) {
+      if (!(await this.indexingManager.waitForReady(INDEX_READY_WAIT_MS))) {
         return { kind: 'song', found: false, detail: '索引未就绪，无法预览搜索结果' };
       }
       const loc = await this.indexingManager.findSongByName(term);
@@ -352,6 +355,9 @@ export class VoiceEngine {
     if (type === 'play_playlist') {
       if (!(argument || '').trim()) {
         return { kind: 'playlist', found: false, detail: '（无歌单名，将使用默认歌单/恢复播放）' };
+      }
+      if (!(await this.indexingManager.waitForReady(INDEX_READY_WAIT_MS))) {
+        return { kind: 'playlist', found: false, detail: '索引未就绪，无法预览搜索结果' };
       }
       const pl = this.indexingManager.findPlaylistByName(argument);
       if (pl) {
@@ -844,8 +850,8 @@ export class VoiceEngine {
   }
 
   private async findLocalSongCandidate(searchTerm: string): Promise<SongSearchCandidate | null> {
-    if (!this.indexingManager.isIndexReady()) {
-      songloft.log.warn('[VoiceEngine] Song index not ready, skip local search');
+    if (!(await this.indexingManager.waitForReady(INDEX_READY_WAIT_MS))) {
+      songloft.log.warn('[VoiceEngine] Song index not ready after wait, skip local search');
       return null;
     }
 
