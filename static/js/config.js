@@ -131,6 +131,10 @@ export function loadConfig() {
             if (externalSearchTimeoutInput) {
                 externalSearchTimeoutInput.value = data.data.external_search_timeout ?? 6;
             }
+            const externalSearchNoImportSwitch = document.getElementById('externalSearchNoImportSwitch');
+            if (externalSearchNoImportSwitch) {
+                externalSearchNoImportSwitch.checked = !!data.data.external_search_no_import;
+            }
             setSearchPriority(data.data.search_priority || 'parallel');
 
             // 加载已安装插件列表后渲染源列表
@@ -761,12 +765,14 @@ function saveExternalSearchConfig() {
     const enabled = switchEl ? switchEl.checked : false;
     const playlistId = (appendSwitch && appendSwitch.checked && playlistSelect) ? playlistSelect.value : '';
     const timeout = timeoutInput ? parseInt(timeoutInput.value, 10) || 6 : 6;
+    const noImportSwitch = document.getElementById('externalSearchNoImportSwitch');
+    const noImport = noImportSwitch ? noImportSwitch.checked : false;
     const searchPriority = getSearchPriority();
     const sources = currentSearchSources
         .filter(s => (s.url || '').trim())
         .map(s => ({ id: s.id, name: (s.name || '').trim(), url: s.url.trim(), token: (s.token || '').trim(), enabled: s.enabled !== false }));
 
-    apiPost('/config', { external_search_enabled: enabled, external_search_sources: sources, external_search_playlist_id: playlistId, external_search_timeout: timeout, search_priority: searchPriority })
+    apiPost('/config', { external_search_enabled: enabled, external_search_sources: sources, external_search_playlist_id: playlistId, external_search_timeout: timeout, external_search_no_import: noImport, search_priority: searchPriority })
         .then(data => {
             if (data.success) {
                 showSnackbar('已保存', 'success');

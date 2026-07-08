@@ -109,6 +109,7 @@ export interface PluginConfig {
   external_search_sources: ExternalSearchSource[]; // 外部搜索源列表，数组顺序即优先级
   external_search_playlist_id: string; // 外部搜索导入后追加到的歌单 ID，空串表示不追加
   external_search_timeout: number;     // 外部搜索超时（秒），默认 6
+  external_search_no_import: boolean;   // 不入库直接播放：命中直链型结果时直接把原始 URL 推给音箱，不写入曲库（临时链接友好）
   search_priority: SearchPriority;     // 搜歌优先级策略
   extra_music_api_models?: string[];
   indicator_light_enabled?: boolean;

@@ -93,6 +93,7 @@ export function registerConfigHandlers(
           external_search_sources: config.external_search_sources || [],
           external_search_playlist_id: config.external_search_playlist_id ?? '',
           external_search_timeout: config.external_search_timeout ?? 6,
+          external_search_no_import: !!config.external_search_no_import,
           search_priority: normalizeSearchPriority(config.search_priority),
           extra_music_api_models: config.extra_music_api_models || [],
           indicator_light_enabled: !!config.indicator_light_enabled,
@@ -199,6 +200,11 @@ export function registerConfigHandlers(
       // 更新 external_search_timeout
       if (body.external_search_timeout !== undefined) {
         config.external_search_timeout = Math.max(3, Math.min(60, Number(body.external_search_timeout) || 6));
+      }
+
+      // 更新 external_search_no_import
+      if (body.external_search_no_import !== undefined) {
+        config.external_search_no_import = !!body.external_search_no_import;
       }
 
       // 更新 search_priority
