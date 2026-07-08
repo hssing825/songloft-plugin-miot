@@ -9,6 +9,9 @@ import { getAllAccountDevices, getDeviceInfo, closeDeviceSelectPanel } from './d
 import { loadPlaylistSongs, highlightSongItem } from './playlist.js';
 import { parseLrc, getCurrentLyricIndex } from './lrc-parser.js';
 
+const DEFAULT_FETCH_TIMEOUT_MS = 0;
+const COVER_FETCH_TIMEOUT_MS = 3500;
+
 /** 播放进度相关状态 */
 let currentPosition = 0;    // 当前播放位置（秒）
 let currentDuration = 0;    // 歌曲总时长（秒）
@@ -399,11 +402,13 @@ export function updatePlayerUI(status) {
                 URL.revokeObjectURL(playerBarCoverObjectUrl);
                 playerBarCoverObjectUrl = null;
             }
-            fetchWithAuth(coverUrl).then(blob => {
+            fetchWithAuth(coverUrl, COVER_FETCH_TIMEOUT_MS).then(blob => {
+                if (coverUrl !== currentPlayerBarCoverUrl) return;
                 playerBarCoverObjectUrl = URL.createObjectURL(blob);
                 const img = document.getElementById('playerBarCover');
                 if (img) img.src = playerBarCoverObjectUrl;
             }).catch(() => {
+                if (coverUrl !== currentPlayerBarCoverUrl) return;
                 const img = document.getElementById('playerBarCover');
                 if (img) img.removeAttribute('src');
             });
@@ -880,17 +885,29 @@ export function closeVolumePanel() {
 /**
  * 用插件 token 认证 fetch 资源（封面、歌词等）
  * @param {string} url - 主程序 API 路径（如 /api/v1/songs/4/cover）
+ * @param {number} timeoutMs - 超时时间（毫秒），0 表示不限制
  * @returns {Promise<Blob|null>}
  */
-export function fetchWithAuth(url) {
+export function fetchWithAuth(url, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS) {
     const token = getAuthToken();
     const headers = {};
     if (token) {
         headers['Authorization'] = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
     }
-    return fetch(url, { headers }).then(res => {
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const options = { headers };
+    let timeoutId = null;
+    if (controller && timeoutMs > 0) {
+        options.signal = controller.signal;
+        timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    }
+
+    return fetch(url, options).then(res => {
         if (!res.ok) throw new Error('fetch failed: ' + res.status);
         return res.blob();
+    }).finally(() => {
+        if (timeoutId) clearTimeout(timeoutId);
     });
 }
 

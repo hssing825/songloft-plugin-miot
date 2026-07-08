@@ -8,22 +8,110 @@ import { showSnackbar, showLoading, hideLoading, showResult, getAccountId, getDe
 import { loadDeviceStatus } from './playback.js';
 import { initPlaylistSearch, initSongSearch } from './search.js';
 
+const COVER_FETCH_TIMEOUT_MS = 3500;
+const MAX_COVER_FETCH_CONCURRENCY = 4;
+
+const coverQueue = [];
+let activeCoverFetches = 0;
+
+const coverObserver = typeof IntersectionObserver !== 'undefined'
+    ? new IntersectionObserver(entries => {
+        entries.forEach(entry => {
+            if (!entry.isIntersecting) return;
+            coverObserver.unobserve(entry.target);
+            const url = entry.target.dataset.coverUrl;
+            if (url) enqueueCoverLoad(entry.target, url);
+        });
+    }, { rootMargin: '240px 0px' })
+    : null;
+
 /**
  * 用插件 token 认证 fetch 封面资源
  * @param {string} url
  * @returns {Promise<Blob|null>}
  */
-function fetchCoverWithAuth(url) {
+function fetchCoverWithAuth(url, timeoutMs = COVER_FETCH_TIMEOUT_MS) {
     const { getAuthToken } = SongloftPlugin;
     const token = getAuthToken();
     const headers = {};
     if (token) {
         headers['Authorization'] = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
     }
-    return fetch(url, { headers }).then(res => {
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const options = { headers };
+    let timeoutId = null;
+    if (controller && timeoutMs > 0) {
+        options.signal = controller.signal;
+        timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    }
+
+    return fetch(url, options).then(res => {
         if (!res.ok) throw new Error('fetch failed: ' + res.status);
         return res.blob();
+    }).finally(() => {
+        if (timeoutId) clearTimeout(timeoutId);
     });
+}
+
+function scheduleCoverLoad(img, url) {
+    img.dataset.coverUrl = url;
+    if (coverObserver) {
+        coverObserver.observe(img);
+    } else {
+        enqueueCoverLoad(img, url);
+    }
+}
+
+function enqueueCoverLoad(img, url) {
+    if (!img || !url || img.dataset.coverQueued === '1') return;
+    img.dataset.coverQueued = '1';
+    coverQueue.push({ img, url });
+    drainCoverQueue();
+}
+
+function drainCoverQueue() {
+    while (activeCoverFetches < MAX_COVER_FETCH_CONCURRENCY && coverQueue.length > 0) {
+        const task = coverQueue.shift();
+        if (!task.img.isConnected || task.img.dataset.coverUrl !== task.url) {
+            continue;
+        }
+
+        activeCoverFetches++;
+        fetchCoverWithAuth(task.url)
+            .then(blob => renderCoverBlob(task.img, task.url, blob))
+            .catch(() => {
+                // 封面获取失败，保持占位图标
+            })
+            .finally(() => {
+                activeCoverFetches--;
+                drainCoverQueue();
+            });
+    }
+}
+
+function renderCoverBlob(img, url, blob) {
+    if (!blob || !img.isConnected || img.dataset.coverUrl !== url) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+        if (img.isConnected && img.dataset.coverUrl === url) {
+            img.src = reader.result;
+        }
+    };
+    reader.readAsDataURL(blob);
+}
+
+function cancelQueuedCovers(container) {
+    if (!container) return;
+    const imgs = container.querySelectorAll('.song-item-cover');
+    imgs.forEach(img => {
+        if (coverObserver) coverObserver.unobserve(img);
+    });
+    for (let i = coverQueue.length - 1; i >= 0; i--) {
+        if (container.contains(coverQueue[i].img)) {
+            coverQueue.splice(i, 1);
+        }
+    }
 }
 
 /**
@@ -228,6 +316,7 @@ export function loadPlaylistSongs(playlistId) {
             return;
         }
 
+        cancelQueuedCovers(songList);
         songList.innerHTML = '';
 
         data.data.forEach((song, index) => {
@@ -247,16 +336,8 @@ export function loadPlaylistSongs(playlistId) {
             coverWrap.appendChild(coverImg);
             coverWrap.appendChild(coverPlaceholder);
             if (song.cover_url) {
-                // 延迟获取封面，避免阻塞列表渲染
-                fetchCoverWithAuth(song.cover_url).then(blob => {
-                    if (blob) {
-                        const reader = new FileReader();
-                        reader.onload = () => { coverImg.src = reader.result; };
-                        reader.readAsDataURL(blob);
-                    }
-                }).catch(() => {
-                    // 封面获取失败，保持占位图标
-                });
+                // 懒加载 + 限并发，避免坏封面占满浏览器连接池
+                scheduleCoverLoad(coverImg, song.cover_url);
             }
             item.appendChild(coverWrap);
 

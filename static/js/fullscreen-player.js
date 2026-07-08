@@ -25,6 +25,7 @@ let currentPage = 0;
 
 const RESUME_DELAY = 3000;
 const LINE_HEIGHT = 48;
+const COVER_FETCH_TIMEOUT_MS = 3500;
 
 export function initFullscreenPlayer() {
     addStatusListener(onStatusUpdate);
@@ -176,12 +177,14 @@ function loadCover(url) {
         return;
     }
 
-    fetchWithAuth(url).then(blob => {
+    fetchWithAuth(url, COVER_FETCH_TIMEOUT_MS).then(blob => {
+        if (url !== coverUrl) return;
         if (coverObjectUrl) URL.revokeObjectURL(coverObjectUrl);
         coverObjectUrl = URL.createObjectURL(blob);
         if (coverImg) coverImg.src = coverObjectUrl;
         if (bgImage) bgImage.style.backgroundImage = `url(${coverObjectUrl})`;
     }).catch(() => {
+        if (url !== coverUrl) return;
         if (coverImg) coverImg.src = '';
         if (bgImage) bgImage.style.backgroundImage = '';
     });
