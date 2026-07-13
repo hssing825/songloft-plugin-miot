@@ -92,6 +92,18 @@ export interface ExternalSearchSource {
   enabled: boolean;  // 单源启用开关
 }
 
+/**
+ * 其他插件通过 songloft.comm 注册进来的「搜索源候选」。
+ * entryPath 一律以宿主注入的可信 from 为准，绝不取自 payload（防伪造）。
+ * 落盘后与 config handler 里的内置 knownProviders 合并去重，供配置页下拉选择。
+ */
+export interface SearchProviderRegistration {
+  entryPath: string;   // 提供方插件 entryPath（= 可信 from）
+  name: string;        // 显示名
+  searchPath: string;  // 搜索子路径，默认 '/api/search/topone'
+  icon?: string;       // 可选图标
+}
+
 /** 插件全局配置 */
 export interface PluginConfig {
   version: string;

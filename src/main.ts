@@ -23,6 +23,7 @@ import { registerConversationHandlers } from './handlers/conversation';
 import { registerScheduleHandlers } from './handlers/schedule';
 import { registerVoiceCommandHandlers } from './handlers/voice_command';
 import { registerIndexingHandlers } from './handlers/indexing';
+import { registerSearchProviderComm } from './handlers/search_registry';
 import { setHostBaseUrl } from './utils/http';
 import { setPollDebug } from './utils/debug';
 
@@ -86,6 +87,9 @@ async function onInit(): Promise<void> {
   registerScheduleHandlers(router, scheduler, configManager);
   registerVoiceCommandHandlers(router, configManager, voiceEngine);
   registerIndexingHandlers(router, indexingManager);
+
+  // 注册「搜索源候选」的插件间通信入口（其他插件经 comm 自注册）
+  registerSearchProviderComm(configManager);
 
   // 自动登录 + 启动后台服务（异步，不阻塞插件初始化）
   authService.autoLoginAll().catch(e => {

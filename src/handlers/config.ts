@@ -336,12 +336,41 @@ export function registerConfigHandlers(
   });
 
   // GET /search-providers - 获取可用的外部搜索提供方列表
+  // 内置 knownProviders（fallback）+ 其他插件经 comm 动态注册的候选，按 entryPath 去重
+  // （注册表优先，可覆盖内置元数据），再做 installed/active 校验。响应结构对前端保持不变。
   router.get('/search-providers', async (_req: HTTPRequest) => {
-    const knownProviders = [
-      { id: 'ytdlp', name: 'yt-dlp', entryPath: 'ytdlp', searchPath: '/api/search/topone' },
-      { id: 'bili', name: '哔哩音乐', entryPath: 'bili', searchPath: '/api/search/topone' },
-      { id: 'subsonic', name: 'Subsonic', entryPath: 'subsonic', searchPath: '/api/search/topone' },
+    interface ProviderCandidate {
+      entryPath: string;
+      name: string;
+      searchPath: string;
+      icon?: string;
+    }
+
+    // 内置候选：旧版提供方 / 启动顺序竞态 / miot 尚未收到注册时兜底
+    const knownProviders: ProviderCandidate[] = [
+      { entryPath: 'ytdlp', name: 'yt-dlp', searchPath: '/api/search/topone' },
+      { entryPath: 'bili', name: '哔哩音乐', searchPath: '/api/search/topone' },
+      { entryPath: 'subsonic', name: 'Subsonic', searchPath: '/api/search/topone' },
     ];
+
+    // 按 entryPath 合并去重：先内置，再用注册表覆盖（注册表优先）
+    const byEntryPath = new Map<string, ProviderCandidate>();
+    for (const p of knownProviders) {
+      byEntryPath.set(p.entryPath, p);
+    }
+    try {
+      const registered = await configManager.getSearchProviders();
+      for (const r of registered) {
+        byEntryPath.set(r.entryPath, {
+          entryPath: r.entryPath,
+          name: r.name || r.entryPath,
+          searchPath: r.searchPath || '/api/search/topone',
+          icon: r.icon,
+        });
+      }
+    } catch (e) {
+      songloft.log.warn('[config] Failed to load registered search providers: ' + String(e));
+    }
 
     interface HostPlugin {
       entry_path: string;
@@ -356,14 +385,15 @@ export function registerConfigHandlers(
       songloft.log.warn('[config] Failed to fetch plugin list: ' + String(e));
     }
 
-    const providers = knownProviders.map(p => {
+    const providers = Array.from(byEntryPath.values()).map(p => {
       const found = installedPlugins.find(ip => ip.entry_path === p.entryPath);
       return {
-        id: p.id,
+        id: p.entryPath,
         name: p.name,
         url: `/api/v1/jsplugin/${p.entryPath}${p.searchPath}`,
         installed: !!found,
         active: found?.status === 'active',
+        ...(p.icon ? { icon: p.icon } : {}),
       };
     });
 

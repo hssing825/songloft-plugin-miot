@@ -6,6 +6,7 @@
 import type {
   PluginConfig,
   ExternalSearchSource,
+  SearchProviderRegistration,
   AccountConfig,
   DeviceConfig,
   WebhookConfig,
@@ -23,6 +24,10 @@ const STORAGE_KEY_VOICE_COMMANDS = 'voice_commands';
 const STORAGE_KEY_SCHEDULED_TASKS = 'scheduled_tasks';
 const STORAGE_KEY_SCHEDULE_LOGS = 'schedule_logs';
 const STORAGE_KEY_AI_CONFIG = 'ai_config';
+const STORAGE_KEY_SEARCH_PROVIDERS = 'search_provider_registry';
+
+/** 搜索源候选注册默认搜索子路径 */
+const DEFAULT_SEARCH_PATH = '/api/search/topone';
 
 /** 日志最大条数（环形缓冲） */
 const MAX_SCHEDULE_LOGS = 200;
@@ -274,6 +279,49 @@ export class ConfigManager {
       throw new Error(`Webhook not found: ${webhookId}`);
     }
     await this.saveWebhooks(filtered);
+  }
+
+  // ===== 搜索源候选注册表（其他插件经 comm 注册） =====
+
+  /** 获取所有已注册的搜索源候选 */
+  async getSearchProviders(): Promise<SearchProviderRegistration[]> {
+    return this.load<SearchProviderRegistration[]>(STORAGE_KEY_SEARCH_PROVIDERS, []);
+  }
+
+  /**
+   * 注册/更新一个搜索源候选（按 entryPath 幂等去重覆盖）。
+   * entryPath 由调用方以宿主可信 from 传入，不接受 payload 伪造。
+   */
+  async upsertSearchProvider(reg: SearchProviderRegistration): Promise<void> {
+    const entryPath = (reg.entryPath || '').trim();
+    if (!entryPath) {
+      throw new Error('search provider entryPath is required');
+    }
+    const normalized: SearchProviderRegistration = {
+      entryPath,
+      name: (reg.name || '').trim() || entryPath,
+      searchPath: (reg.searchPath || '').trim() || DEFAULT_SEARCH_PATH,
+      icon: typeof reg.icon === 'string' ? reg.icon.trim() : undefined,
+    };
+    const providers = await this.getSearchProviders();
+    const idx = providers.findIndex(p => p.entryPath === entryPath);
+    if (idx === -1) {
+      providers.push(normalized);
+    } else {
+      providers[idx] = normalized;
+    }
+    await this.save(STORAGE_KEY_SEARCH_PROVIDERS, providers);
+  }
+
+  /** 注销一个搜索源候选（按 entryPath，不存在则静默） */
+  async removeSearchProvider(entryPath: string): Promise<void> {
+    const key = (entryPath || '').trim();
+    if (!key) return;
+    const providers = await this.getSearchProviders();
+    const filtered = providers.filter(p => p.entryPath !== key);
+    if (filtered.length !== providers.length) {
+      await this.save(STORAGE_KEY_SEARCH_PROVIDERS, filtered);
+    }
   }
 
   // ===== 语音口令 =====
