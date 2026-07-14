@@ -1,6 +1,8 @@
 // MIoT 智能音箱插件 - Mina API 常量定义
 // 翻译自 Go 源码: plugins/songloft-plugin-xiaomi/pkg/mina/constants.go
 
+import ttsCommandData from '../data/tts-commands.json';
+
 /** 小米账号服务基础 URL */
 export const ACCOUNT_BASE_URL = 'https://account.xiaomi.com';
 
@@ -86,29 +88,12 @@ export const NEED_USE_PLAY_MUSIC_API: Record<string, boolean> = {
 
 /**
  * 支持通过 MIoT action 播放 TTS 的设备型号。
- * 映射值为 xiaomusic 的 TTS command: "<siid>-<aiid>"。
+ * 映射值为 xiaomusic 的 TTS command: "<siid>-<aiid>"（intelligent-speaker 服务的 play-text action）。
+ *
+ * 数据源:src/data/tts-commands.json,由 `npm run sync:tts` 从 miot-spec 同步补充,
+ * 人工确认的别名(如 ASX4B)与冲突值以该文件为准。切勿在此处硬编码。
  */
-export const TTS_COMMAND: Record<string, string> = {
-  OH2: '5-3',
-  OH2P: '7-3',
-  LX06: '5-1',
-  S12: '5-1',
-  L15A: '7-3',
-  LX5A: '5-1',
-  LX01: '5-1',
-  LX05: '5-1',
-  X10A: '7-3',
-  L17A: '7-3',
-  ASX4B: '5-3',
-  L06A: '5-1',
-  L05B: '5-3',
-  L05C: '5-3',
-  X6A: '7-3',
-  X08E: '7-3',
-  X8F: '7-3',
-  L09A: '3-1',
-  LX04: '5-1',
-};
+export const TTS_COMMAND: Record<string, string> = ttsCommandData;
 
 /**
  * 判断指定硬件型号是否需要通过 Mina 方式获取对话记录
