@@ -659,6 +659,17 @@ export function loadDeviceStatus(force) {
 }
 
 /**
+ * 应用一条推送/拉取到的设备状态到 UI。
+ * 与 loadDeviceStatus 共用同一个 2s toggle 抑制窗口：刚点过播放/暂停等操作的 2s 内，
+ * 忽略此次状态，避免过期数据覆盖乐观 UI。供 WebSocket 状态推送（status-stream.js）调用。
+ */
+export function handlePushedStatus(status) {
+    if (!status) return;
+    if (lastToggleMs > 0 && (Date.now() - lastToggleMs < 2000)) return;
+    updatePlayerUI(status);
+}
+
+/**
  * 根据当前选中设备的缓存数据，将音量同步到 UI
  * 数据源：/mina/devices 接口返回的 device.volume（持久化属性）
  * 调用时机：设备列表刷新后、设备切换后、初始加载完成后

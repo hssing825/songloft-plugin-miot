@@ -1,5 +1,5 @@
 import { createRouter } from '@songloft/plugin-sdk';
-import type { HTTPRequest, HTTPResponse } from '@songloft/plugin-sdk';
+import type { HTTPRequest, HTTPResponse, WebSocketRequest, InboundWebSocket } from '@songloft/plugin-sdk';
 import { ConfigManager } from './config/manager';
 import { AccountManager } from './account/manager';
 import { AuthService } from './auth/service';
@@ -28,6 +28,7 @@ import { registerMemoryHandlers } from './handlers/memory';
 import { registerSearchProviderComm } from './handlers/search_registry';
 import { setHostBaseUrl } from './utils/http';
 import { setPollDebug } from './utils/debug';
+import { initStatusStream, handleStatusWebSocket, WS_STATUS_PATH } from './ws/status-stream';
 
 const router = createRouter();
 
@@ -56,6 +57,9 @@ async function onInit(): Promise<void> {
   minaService = new MinaService(accountManager, configManager);
   playlistManagerMap = new PlaylistManagerMap(minaService, configManager);
   memoryService = new MemoryService();
+
+  // 注入状态推送依赖（WebSocket 订阅端点 /status/ws 使用）
+  initStatusStream(playlistManagerMap, minaService);
 
   // 从配置中读取服务器地址并设置音箱播放 URL 基础地址
   const pluginConfig = await configManager.getConfig();
@@ -141,7 +145,17 @@ async function onHTTPRequest(req: HTTPRequest): Promise<HTTPResponse> {
   return await router.handle(req);
 }
 
+// 入站 WebSocket：目前仅用于播放状态推送订阅（/status/ws）
+async function onWebSocket(req: WebSocketRequest, socket: InboundWebSocket): Promise<void> {
+  if (req.path === WS_STATUS_PATH) {
+    await handleStatusWebSocket(req, socket);
+    return;
+  }
+  await socket.close(1008, 'unknown websocket path');
+}
+
 // 暴露为全局（QuickJS 需要显式声明）。SDK 0.8+ 已正式支持 async 签名。
 globalThis.onInit = onInit;
 globalThis.onDeinit = onDeinit;
 globalThis.onHTTPRequest = onHTTPRequest;
+globalThis.onWebSocket = onWebSocket;

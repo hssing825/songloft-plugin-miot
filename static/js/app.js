@@ -32,7 +32,6 @@ import {
     toggleMute,
     updateVolumeIcon,
     getPlayerStatus,
-    loadDeviceStatus,
     togglePlayPause,
     togglePlayModePanel,
     closePlayModePanel,
@@ -42,6 +41,7 @@ import {
     closeAllPopups,
     stopPlaylist
 } from './playback.js';
+import { connectStatusStream, disconnectStatusStream } from './status-stream.js';
 import { initDialogs } from './modal.js';
 import { autoFillServerHost, saveConfig, loadConfig, initServerHostUI, initPollIntervalUI, initConversationPollDebugUI, initSmartResumeUI, initMaxSongIndexUI, initConversationUI, initVoiceCommandUI, initVoiceMemoryUI, initTimezoneUI, initForceMp3UI, initIndicatorLightUI, initTouchscreenLyricsUI, initExtraMusicApiModelsUI, initAIConfigUI, initExternalSearchUI, initExternalSearchSpecUI, initInterruptBroadcastUI, initDefaultCoverUI } from './config.js';
 import { addAccount, addAccountWithToken, deleteAccount, toggleDeviceManagement, loadAccounts, reLoginAccount } from './account.js';
@@ -296,32 +296,24 @@ window._startQRCodeLogin = startQRCodeLogin;
 window._retryQRCode = startQRCodeLogin;
 window._reLoginAccount = reLoginAccount;
 
-// ========== 定时刷新播放状态 ==========
-
-/** 播放状态定时刷新定时器 */
-let playerStatusTimer = null;
+// ========== 实时刷新播放状态 ==========
+//
+// 优先用 WebSocket 订阅后端状态推送；WS 不可用时 status-stream.js 内部自动降级为
+// 每秒轮询 loadDeviceStatus()。函数名保持不变，device.js 切换设备时仍调用它重连。
 
 /**
- * 启动播放状态定时刷新（每秒一次）
- * 切换设备时调用此函数重置定时器
+ * 启动播放状态实时刷新（WebSocket 优先，失败降级轮询）。
+ * 切换设备时调用此函数按新设备重连。
  */
 export function startPlayerStatusPolling() {
-    if (playerStatusTimer) {
-        clearInterval(playerStatusTimer);
-    }
-    playerStatusTimer = setInterval(() => {
-        loadDeviceStatus();
-    }, 1000);
+    connectStatusStream(window.currentAccountId || '', window.currentDeviceId || '');
 }
 
 /**
- * 停止播放状态定时刷新
+ * 停止播放状态实时刷新（断开 WS 并停止兜底轮询）。
  */
 export function stopPlayerStatusPolling() {
-    if (playerStatusTimer) {
-        clearInterval(playerStatusTimer);
-        playerStatusTimer = null;
-    }
+    disconnectStatusStream();
 }
 
 // ========== 初始化 ==========

@@ -17,7 +17,8 @@
     "playlists.read",
     "playlists.write",
     "inter-plugin",
-    "command"
+    "command",
+    "websocket"
   ],
   "updateUrl": "https://raw.githubusercontent.com/songloft-org/songloft-plugin-miot/main/plugin.json",
   "download_url": "https://github.com/songloft-org/songloft-plugin-miot/releases/download/v2026.7.16/miot.jsplugin.zip",
