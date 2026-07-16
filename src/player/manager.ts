@@ -128,6 +128,58 @@ export class PlaylistManager {
   }
 
   /**
+   * 播放歌单并从指定歌曲 ID 开始播放
+   * 用于外部搜索导入并追加到歌单后，接管为「完整歌单播放」，
+   * 使歌曲播完后由切歌定时器自动续播歌单其余歌曲（issue #53）。
+   * 找不到该歌曲时回退到从歌单头部播放。
+   * @param playlistId - 歌单ID
+   * @param songId - 起始歌曲ID（通常是刚追加到歌单末尾的那首）
+   * @param mode - 播放模式（默认order）
+   * @returns 是否成功
+   */
+  async playPlaylistFromSong(playlistId: number, songId: number, mode?: PlayMode): Promise<boolean> {
+    // 立即停止定时器和重置状态，防止 loadPlaylistSongs 期间旧定时器触发 onSongFinished
+    this.stopCheckTimer();
+    this.state = 'idle';
+    this.playStartTimeMs = 0;
+    this._lastLoadNotFound = false;
+
+    const loaded = await this.loadPlaylistSongs(playlistId);
+    if (!loaded) {
+      songloft.log.error('[PlaylistManager] playPlaylistFromSong: loadPlaylistSongs returned false, playlistId=' + playlistId);
+      return false;
+    }
+
+    if (this.songs.length === 0) {
+      songloft.log.warn('[PlaylistManager] Playlist is empty: ' + playlistId);
+      return false;
+    }
+
+    // 定位目标歌曲索引；追加的歌曲通常在末尾，找不到时回退到从头播放
+    let startIndex = this.songs.findIndex(s => s.id === songId);
+    if (startIndex < 0) {
+      songloft.log.warn(`[PlaylistManager] Song ${songId} not found in playlist ${playlistId}, starting from head`);
+      startIndex = 0;
+    }
+
+    this.playlistId = playlistId;
+    this.currentIndex = startIndex;
+    this.playMode = mode || 'order';
+    this.randomPlayed = new Set();
+
+    const ok = await this.playCurrent();
+    if (!ok) {
+      songloft.log.error('[PlaylistManager] playPlaylistFromSong: Failed to play current song');
+      return false;
+    }
+
+    await this.persistState();
+
+    songloft.log.info(`[PlaylistManager] Playlist started from song id=${songId} playlistId=${playlistId} index=${startIndex} mode=${this.playMode} total=${this.songs.length}`);
+    return true;
+  }
+
+  /**
    * 暂停播放（保持状态，可恢复）
    */
   async pause(): Promise<void> {

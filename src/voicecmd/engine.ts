@@ -1239,8 +1239,9 @@ export class VoiceEngine {
       case 'external_search': {
         // 外部搜索播放成功后，由 playSearchResult 增量把这首歌加入索引（见 addImportedSong），
         // 后续可直接本地命中，无需为一首独立远程歌曲重建全部歌单缓存。
+        // 传入 pm：若已配置导入歌单，接管为完整歌单播放，播完自动续播（issue #53）。
         const played = await this.onlineSearcher.playSearchResult(
-          candidate.song, accountId, deviceId, this.minaService, this.indexingManager,
+          candidate.song, accountId, deviceId, this.minaService, this.indexingManager, pm,
         );
         return played ? {
           songName: candidate.song.title,

@@ -8,7 +8,8 @@ import { getHostAPIBaseUrl } from '../utils/http';
 import { URLBuilder } from '../player/url_builder';
 import { ConfigManager } from '../config/manager';
 import { IndexingManager } from '../indexing/manager';
-import type { ExternalSearchSource } from '../types';
+import type { ExternalSearchSource, PlayMode } from '../types';
+import type { PlaylistManager } from '../player/manager';
 
 // 外部搜索 API 请求体
 interface SearchOneRequest {
@@ -234,6 +235,7 @@ export class OnlineSearcher {
     deviceId: string,
     minaService: MinaService,
     indexingManager?: IndexingManager,
+    pm?: PlaylistManager,
   ): Promise<boolean> {
     const config = await this.configManager.getConfig();
 
@@ -280,6 +282,34 @@ export class OnlineSearcher {
         const pidNum = Number(pid);
         if (!Number.isNaN(pidNum)) appendedPlaylistId = pidNum;
       } catch (e) { songloft.log.warn(`[OnlineSearcher] 追加歌单失败: ${String(e)}`); }
+    }
+
+    // 已追加到目标歌单且提供了播放管理器：接管为完整歌单播放，从这首新歌
+    // 开始，播完后由 PlaylistManager 的切歌定时器自动续播歌单其余歌曲。
+    // （直接 playURL 单曲推送不会注册切歌定时器，播完即停，见 issue #53）
+    if (pm && appendedPlaylistId !== undefined) {
+      let playMode: PlayMode = 'order';
+      try {
+        const devices = await this.configManager.getDevices(accountId);
+        const devCfg = devices.find((d) => d.device_id === deviceId);
+        if (devCfg && devCfg.play_mode) playMode = devCfg.play_mode as PlayMode;
+      } catch (e) {
+        songloft.log.warn('[OnlineSearcher] Failed to read play mode, fallback to order: ' + String(e));
+      }
+
+      const ok = await pm.playPlaylistFromSong(appendedPlaylistId, imported.id, playMode);
+      if (ok) {
+        // 增量把这首独立远程歌曲加入内存索引，避免为一首歌重建全部歌单缓存。
+        if (indexingManager) {
+          indexingManager.addImportedSong(
+            { id: imported.id, title: song.title, artist: song.artist, album: song.album },
+            appendedPlaylistId,
+          );
+        }
+        songloft.log.info(`[OnlineSearcher] Playing online song via playlist ${appendedPlaylistId} (auto-continue): ${song.title} - ${song.artist}`);
+        return true;
+      }
+      songloft.log.warn(`[OnlineSearcher] Playlist takeover failed for playlist ${appendedPlaylistId}, falling back to single URL push`);
     }
 
     // 用返回的 url 构造完整播放 URL（相对路径，URLBuilder 会拼接 server_host 和 token）
