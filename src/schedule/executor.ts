@@ -10,7 +10,7 @@ import { MinaService } from '../service/service';
 import { PlaylistManagerMap } from '../player/manager';
 import { IndexingManager } from '../indexing/manager';
 import { ConversationMonitor } from '../conversation/monitor';
-import type { ScheduledTask, TaskLog, TaskTarget, TaskParams, PlayMode } from '../types';
+import type { ScheduledTask, TaskLog, TaskTarget, TaskParams, PlayMode, DeviceConfig } from '../types';
 
 /** 解析后的单个目标设备 */
 interface DeviceTarget {
@@ -259,6 +259,12 @@ export class TaskExecutor {
    * 执行播放歌单动作
    * 通过歌单名称查找歌单，然后调用 PlaylistManager 播放
    * @param withSong - 是否从指定歌曲开始播放（play_playlist_from）
+   *
+   * 起始位置（play_playlist，由 params.start_position 决定）：
+   * - first  : 从第一首开始（默认，兼容旧任务）
+   * - resume : 沿用设备持久化的 current_song_index（仅当上次播的就是同一歌单）
+   * - random : 每次执行随机挑一首作为起点
+   * 播放模式：params.play_mode 指定则用它；为空表示「跟随上次」→ 用设备持久化模式；再兜底 order。
    */
   private async executePlayPlaylist(target: DeviceTarget, params: TaskParams, withSong: boolean): Promise<string> {
     const playlistName = params.playlist_name;
@@ -278,24 +284,57 @@ export class TaskExecutor {
 
     songloft.log.info(`[TaskExecutor] 匹配到歌单 name=${playlistName} matched=${playlist.name} id=${playlist.id}`);
 
-    // 确定起始位置
-    let startIndex = 0;
-    if (withSong && params.song_name) {
-      const result = await this.indexingManager.findSongInPlaylist(playlist.id, params.song_name);
-      if (result.found) {
-        startIndex = result.index;
-        songloft.log.info(`[TaskExecutor] 匹配到歌曲 song_name=${params.song_name} index=${startIndex}`);
-      } else {
-        songloft.log.warn(`[TaskExecutor] 未找到匹配的歌曲，从第一首开始 song_name=${params.song_name}`);
-      }
-    }
+    // 读取设备持久化状态，供「从上次进度继续」和「跟随上次播放模式」使用
+    const devCfg = await this.getDeviceConfig(target);
 
-    // 确定播放模式
-    const playMode: PlayMode = (params.play_mode as PlayMode) || 'order';
+    // 确定播放模式：显式指定 > 跟随上次（设备持久化） > 兜底 order
+    const playMode: PlayMode = ((params.play_mode || devCfg?.play_mode || 'order') as PlayMode);
+
+    // 计算给定歌单 ID 下的起始位置（歌单 ID 失效重试时会用新 ID 再算一次）
+    const resolveStart = async (pid: number): Promise<{ startIndex: number; randomStart: boolean }> => {
+      if (withSong) {
+        // play_playlist_from：按 song_name 定位起始歌曲
+        let idx = 0;
+        if (params.song_name) {
+          const result = await this.indexingManager.findSongInPlaylist(pid, params.song_name);
+          if (result.found) {
+            idx = result.index;
+            songloft.log.info(`[TaskExecutor] 匹配到歌曲 song_name=${params.song_name} index=${idx}`);
+          } else {
+            songloft.log.warn(`[TaskExecutor] 未找到匹配的歌曲，从第一首开始 song_name=${params.song_name}`);
+          }
+        }
+        return { startIndex: idx, randomStart: false };
+      }
+
+      switch (params.start_position) {
+        case 'random':
+          return { startIndex: 0, randomStart: true };
+        case 'resume':
+          // 仅当设备上次播的就是这个歌单，续播索引才有意义
+          if (devCfg && devCfg.playlist_id === pid && devCfg.current_song_index > 0) {
+            songloft.log.info(`[TaskExecutor] 从上次进度继续 playlistId=${pid} index=${devCfg.current_song_index}`);
+            return { startIndex: devCfg.current_song_index, randomStart: false };
+          }
+          songloft.log.info(`[TaskExecutor] 无可续播进度（歌单不匹配或首次），从第一首开始 playlistId=${pid}`);
+          return { startIndex: 0, randomStart: false };
+        default:
+          return { startIndex: 0, randomStart: false };
+      }
+    };
+
+    // 描述起始位置（用于返回给日志/前端的友好文案）
+    const describeStart = (start: { startIndex: number; randomStart: boolean }): string => {
+      if (withSong && params.song_name) return `（从「${params.song_name}」开始）`;
+      if (start.randomStart) return '（随机起始）';
+      if (params.start_position === 'resume' && start.startIndex > 0) return '（从上次进度继续）';
+      return '';
+    };
 
     // 获取或创建设备的播放管理器并开始播放
     const pm = await this.playlistManagerMap.getOrCreate(target.accountId, target.deviceId);
-    const ok = await pm.play(playlist.id, startIndex, playMode);
+    const start = await resolveStart(playlist.id);
+    const ok = await pm.play(playlist.id, start.startIndex, playMode, { randomStart: start.randomStart });
     if (!ok) {
       // 歌单 ID 已失效（扫描后 auto-create 歌单 ID 变化）：刷新索引后重试一次
       if (pm.isLastPlayNotFound()) {
@@ -306,29 +345,30 @@ export class TaskExecutor {
         if (!newPlaylist) {
           throw new Error(`刷新索引后仍未找到歌单: ${playlistName}`);
         }
-        let retryIndex = 0;
-        if (withSong && params.song_name) {
-          const result = await this.indexingManager.findSongInPlaylist(newPlaylist.id, params.song_name);
-          if (result.found) {
-            retryIndex = result.index;
-          }
-        }
-        const retryOk = await pm.play(newPlaylist.id, retryIndex, playMode);
+        const retryStart = await resolveStart(newPlaylist.id);
+        const retryOk = await pm.play(newPlaylist.id, retryStart.startIndex, playMode, { randomStart: retryStart.randomStart });
         if (!retryOk) {
           throw new Error(`播放歌单失败(重试后): ${newPlaylist.name}`);
         }
-        if (withSong && params.song_name) {
-          return `播放歌单「${newPlaylist.name}」（从「${params.song_name}」开始）成功`;
-        }
-        return `播放歌单「${newPlaylist.name}」成功`;
+        return `播放歌单「${newPlaylist.name}」${describeStart(retryStart)}成功`;
       }
       throw new Error(`播放歌单失败: ${playlist.name}`);
     }
 
-    if (withSong && params.song_name) {
-      return `播放歌单「${playlist.name}」（从「${params.song_name}」开始）成功`;
+    return `播放歌单「${playlist.name}」${describeStart(start)}成功`;
+  }
+
+  /**
+   * 读取目标设备的持久化配置（找不到返回 null）
+   */
+  private async getDeviceConfig(target: DeviceTarget): Promise<DeviceConfig | null> {
+    try {
+      const devices = await this.configManager.getDevices(target.accountId);
+      return devices.find(d => d.device_id === target.deviceId) ?? null;
+    } catch (e) {
+      songloft.log.warn(`[TaskExecutor] 读取设备配置失败 device=${target.deviceId}: ${String(e)}`);
+      return null;
     }
-    return `播放歌单「${playlist.name}」成功`;
   }
 
   /**

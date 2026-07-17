@@ -85,9 +85,10 @@ export class PlaylistManager {
    * @param playlistId - 歌单ID
    * @param startIndex - 起始歌曲索引（默认0）
    * @param mode - 播放模式（默认order）
+   * @param opts.randomStart - 忽略 startIndex，加载歌单后随机挑一首作为起点
    * @returns 是否成功
    */
-  async play(playlistId: number, startIndex?: number, mode?: PlayMode): Promise<boolean> {
+  async play(playlistId: number, startIndex?: number, mode?: PlayMode, opts?: { randomStart?: boolean }): Promise<boolean> {
     // 立即停止定时器和重置状态，防止 loadPlaylistSongs 期间旧定时器触发 onSongFinished
     this.stopCheckTimer();
     this.state = 'idle';
@@ -108,8 +109,12 @@ export class PlaylistManager {
 
     // 设置播放参数
     this.playlistId = playlistId;
-    this.currentIndex = (startIndex !== undefined && startIndex >= 0 && startIndex < this.songs.length)
-      ? startIndex : 0;
+    if (opts?.randomStart && this.songs.length > 0) {
+      this.currentIndex = Math.floor(Math.random() * this.songs.length);
+    } else {
+      this.currentIndex = (startIndex !== undefined && startIndex >= 0 && startIndex < this.songs.length)
+        ? startIndex : 0;
+    }
     this.playMode = mode || 'order';
     this.randomPlayed = new Set();
 

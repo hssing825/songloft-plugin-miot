@@ -37,6 +37,13 @@ const playModeLabels = {
     'random': '随机播放',
 };
 
+/** 起始位置映射 */
+const startPositionLabels = {
+    'first': '从第一首',
+    'resume': '续播',
+    'random': '随机位置',
+};
+
 /** 星期映射 */
 const weekdayLabels = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
@@ -242,12 +249,20 @@ function formatScheduleDesc(schedule) {
 function formatParamDesc(action, params) {
     if (!params) return '';
     switch (action) {
-        case 'play_playlist':
-            return params.playlist_name ? `歌单「${params.playlist_name}」` : '';
+        case 'play_playlist': {
+            if (!params.playlist_name) return '';
+            const parts = [];
+            const posLabel = startPositionLabels[params.start_position];
+            if (posLabel && params.start_position !== 'first') parts.push(posLabel);
+            if (params.play_mode) parts.push(playModeLabels[params.play_mode] || params.play_mode);
+            const extra = parts.length ? `（${parts.join('，')}）` : '';
+            return `歌单「${params.playlist_name}」${extra}`;
+        }
         case 'play_playlist_from': {
             const plName = params.playlist_name ? `歌单「${params.playlist_name}」` : '';
             const songDesc = params.song_name ? `从「${params.song_name}」开始` : '从第一首开始';
-            return plName ? `${plName}（${songDesc}）` : '';
+            const modeDesc = params.play_mode ? `，${playModeLabels[params.play_mode] || params.play_mode}` : '';
+            return plName ? `${plName}（${songDesc}${modeDesc}）` : '';
         }
         case 'set_play_mode':
             return playModeLabels[params.play_mode] || params.play_mode || '';
@@ -383,6 +398,10 @@ function resetForm() {
     if (playlistSelect) playlistSelect.value = '';
     const songSelect = document.getElementById('scheduleSongSelect');
     if (songSelect) songSelect.innerHTML = '<option value="">-- 从第一首开始 --</option>';
+    const startPos = document.getElementById('scheduleStartPosition');
+    if (startPos) startPos.value = 'first';
+    const playlistPlayMode = document.getElementById('schedulePlaylistPlayMode');
+    if (playlistPlayMode) playlistPlayMode.value = '';
     const playMode = document.getElementById('schedulePlayMode');
     if (playMode) playMode.value = 'loop';
     const volume = document.getElementById('scheduleVolume');
@@ -444,7 +463,15 @@ function fillForm(task) {
         }
     }
 
-    // 其他参数
+    // 起始位置（play_playlist）
+    const startPos = document.getElementById('scheduleStartPosition');
+    if (startPos) startPos.value = task.params.start_position || 'first';
+
+    // 播放模式（play_playlist / play_playlist_from，空串=跟随上次）
+    const playlistPlayMode = document.getElementById('schedulePlaylistPlayMode');
+    if (playlistPlayMode) playlistPlayMode.value = task.params.play_mode || '';
+
+    // 其他参数（set_play_mode 专用下拉）
     const playMode = document.getElementById('schedulePlayMode');
     if (playMode) playMode.value = task.params.play_mode || 'loop';
     const volume = document.getElementById('scheduleVolume');
@@ -496,10 +523,13 @@ function updateActionParams() {
     switch (action) {
         case 'play_playlist':
             show('paramPlaylist');
+            show('paramStartPosition');
+            show('paramPlaylistPlayMode');
             break;
         case 'play_playlist_from':
             show('paramPlaylist');
             show('paramStartIndex');
+            show('paramPlaylistPlayMode');
             break;
         case 'set_play_mode':
             show('paramPlayMode');
@@ -653,6 +683,18 @@ function saveScheduleTask() {
             // 只保存歌单名称，执行时通过名称查找
             const pl = cachedPlaylists.find(p => String(p.id) === pid);
             params.playlist_name = pl ? pl.name : (playlistSelect.options[playlistSelect.selectedIndex]?.textContent || '');
+            // 播放模式（空串=跟随上次），play_playlist / play_playlist_from 通用
+            const playlistPlayMode = document.getElementById('schedulePlaylistPlayMode');
+            if (playlistPlayMode && playlistPlayMode.value) {
+                params.play_mode = playlistPlayMode.value;
+            }
+        }
+        if (action === 'play_playlist') {
+            // 起始位置（first=从第一首,缺省即旧行为;resume=续播;random=随机）
+            const startPos = document.getElementById('scheduleStartPosition');
+            if (startPos && startPos.value && startPos.value !== 'first') {
+                params.start_position = startPos.value;
+            }
         }
         if (action === 'play_playlist_from') {
             const songSelect = document.getElementById('scheduleSongSelect');

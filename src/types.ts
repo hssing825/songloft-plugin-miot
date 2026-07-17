@@ -183,12 +183,19 @@ export interface TaskTarget {
   devices: DeviceTargetRef[];  // [{account_id, device_id}]
 }
 
+/** 起始位置(play_playlist 专用) */
+export type StartPosition =
+  | 'first'    // 从第一首开始(默认,兼容旧任务)
+  | 'resume'   // 从上次播放进度继续(设备持久化的 current_song_index)
+  | 'random';  // 每次执行随机挑一首作为起点
+
 /** 任务参数 */
 export interface TaskParams {
   playlist_name?: string;
   playlist_id?: number;
   song_name?: string;      // 用于 play_playlist_from 指定起始歌曲
-  play_mode?: string;
+  start_position?: StartPosition; // 用于 play_playlist 指定起始位置,缺省=first
+  play_mode?: string;      // 空串表示「跟随上次」(沿用设备持久化的播放模式)
   volume?: number;
 }
 
