@@ -97,7 +97,7 @@ const URL_HEALTH_CHECK_TIMEOUT_MS = 3000;
 
 const FIXED_CONTROL_COMMAND_TYPES = new Set(['set_play_mode', 'set_volume', 'next', 'previous', 'stop']);
 const SEARCH_COMMAND_TYPES = new Set(['play_song', 'play_playlist']);
-const BUILTIN_STOP_KEYWORDS = ['暂停播放', '停止播放', '暂停音乐', '停一下', 'pause', 'stop'];
+const BUILTIN_STOP_KEYWORDS = ['暂停播放', '停止播放', '暂停音乐', '停一下', 'pause', 'stop', '暂停'];
 
 /**
  * 有界跳字子序列匹配：在 query 的 rune 数组中按序查找关键词，允许中间插入有限字符。
@@ -158,7 +158,7 @@ export function getDefaultVoiceCommands(): VoiceCommand[] {
     { type: 'set_volume', keywords: ['小声一点', '声音小一点', '音量小一点'], param: 'down', enabled: true },
     { type: 'next', keywords: ['下一首', '切歌', '换一首', '下一曲'], enabled: true },
     { type: 'previous', keywords: ['上一首', '上一曲'], enabled: true },
-    { type: 'stop', keywords: ['暂停播放', '停止播放', '暂停音乐', '停一下', 'pause', 'stop', '停止', '别播了', '关掉音乐', '关机', '关闭'], enabled: true },
+    { type: 'stop', keywords: ['暂停播放', '停止播放', '暂停音乐', '停一下', 'pause', 'stop', '停止', '别播了', '关掉音乐', '关机', '关闭', '暂停'], enabled: true },
   ];
 }
 
@@ -1566,6 +1566,7 @@ export class VoiceEngine {
       songloft.log.info('[VoiceEngine] Playback restored via replay after voice interaction');
     } else {
       songloft.log.warn('[VoiceEngine] Failed to restore playback after voice interaction');
+      await pm.stop();
     }
   }
 

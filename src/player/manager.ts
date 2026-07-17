@@ -770,11 +770,36 @@ export class PlaylistManager {
     const ok = await this.playCurrent();
     if (ok) {
       await this.persistState();
-    } else {
-      songloft.log.error('[PlaylistManager] Auto-next failed, stopping');
-      this.state = 'stopped';
-      this.playStartTimeMs = 0;
+      return;
     }
+
+    // 第一次失败（常见于设备超时 code=3012），等 3 秒重试当前歌曲
+    const retryIndex = this.currentIndex;
+    songloft.log.warn('[PlaylistManager] Auto-next play failed, retrying in 3s');
+    await new Promise(r => setTimeout(r, 3000));
+    if (this.state !== 'playing' || this.currentIndex !== retryIndex) return;
+
+    const retryOk = await this.playCurrent();
+    if (retryOk) {
+      await this.persistState();
+      return;
+    }
+
+    // 重试仍失败，尝试跳到下一首
+    const skipIdx = this.getNextIndex();
+    if (skipIdx >= 0 && skipIdx !== this.currentIndex) {
+      songloft.log.warn('[PlaylistManager] Retry failed, skipping to next song');
+      this.currentIndex = skipIdx;
+      const skipOk = await this.playCurrent();
+      if (skipOk) {
+        await this.persistState();
+        return;
+      }
+    }
+
+    songloft.log.error('[PlaylistManager] Auto-next failed after retry, stopping');
+    this.state = 'stopped';
+    this.playStartTimeMs = 0;
   }
 
   /**
