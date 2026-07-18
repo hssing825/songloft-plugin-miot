@@ -340,6 +340,31 @@ export class PlaylistManager {
   }
 
   /**
+   * 是否仍处于允许用设备进度校准本地自动切歌定时器的窗口。
+   * 仅用于播放刚开始的缓冲修正；歌曲接近结束后不允许设备端小进度回拨定时器，
+   * 否则某些音箱循环拉同一 URL 时会把自动下一首无限推迟。
+   */
+  canCalibrateAutoNextTimer(devicePositionSec: number): boolean {
+    const song = this.getCurrentSong();
+    if (this.state !== 'playing' || !song || song.duration <= 0 || this.playStartTimeMs <= 0) {
+      return false;
+    }
+
+    const elapsedSec = (Date.now() - this.playStartTimeMs) / 1000;
+    const remainingSec = song.duration - elapsedSec;
+    if (remainingSec <= 15 || elapsedSec >= Math.max(45, song.duration * 0.5)) {
+      return false;
+    }
+
+    // 播放一段时间后设备又回到开头，通常表示音箱在重拉同一首，不应用它重置自动切歌。
+    if (elapsedSec > 15 && devicePositionSec < 3) {
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
    * 恢复播放（使用 play 接口继续，不重发 URL）
    * 用于语音命令（如调音量）中断 URL 播放后恢复
    * 同时重置切歌定时器以补偿暂停时间
@@ -723,10 +748,12 @@ export class PlaylistManager {
   private startCheckTimer(durationSec: number): void {
     this.stopCheckTimer();
 
-    const delayMs = Math.floor(durationSec * 1000);
+    const delayMs = Math.max(1, Math.floor(durationSec * 1000));
     songloft.log.info('[PlaylistManager] Timer registered delayMs=' + delayMs);
 
     this.checkTimer = setTimeout(() => {
+      this.checkTimer = null;
+      songloft.log.info('[PlaylistManager] Timer fired');
       this.onSongFinished().catch(e => {
         songloft.log.error('[PlaylistManager] onSongFinished error: ' + String(e));
       });
@@ -751,6 +778,8 @@ export class PlaylistManager {
       songloft.log.info('[PlaylistManager] Not playing, skip auto-next');
       return;
     }
+
+    songloft.log.info(`[PlaylistManager] Song finished, advancing from index=${this.currentIndex}`);
 
     // 通知后端当前歌曲播放完成（触发 JS 插件播放事件广播）
     const finishedSong = this.songs[this.currentIndex];
