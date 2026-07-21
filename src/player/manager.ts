@@ -628,7 +628,10 @@ export class PlaylistManager {
 
   /**
    * 预缓存下一首歌曲（fire-and-forget）
-   * 调用后端 ?prefetch=1 端点触发异步缓存+转码，减少切歌时的冷启动延迟
+   * 调用后端 ?prefetch=1 端点触发异步缓存+转码，减少切歌时的冷启动延迟。
+   * force_mp3 开启时给 prefetch URL 也追加 format=mp3，使预热的转码产物与真实播放 URL
+   * （buildSongURL 的 &format=mp3）命中同一缓存键；否则预热的是源格式、播放要 mp3，
+   * 切歌时 mp3 转码仍冷启动，预热白做。
    */
   private prefetchNextSong(): void {
     const nextIdx = this.getNextIndex();
@@ -639,12 +642,27 @@ export class PlaylistManager {
     if (nextSong.type === 'local') return;
     if (nextSong.url.startsWith('http://') || nextSong.url.startsWith('https://')) return;
 
-    const separator = nextSong.url.includes('?') ? '&' : '?';
-    const prefetchPath = nextSong.url + separator + 'prefetch=1';
-    callHostAPI('GET', prefetchPath, undefined, { timeoutMs: 5000 }).catch(e => {
-      songloft.log.warn('[PlaylistManager] Prefetch failed: ' + String(e));
-    });
-    songloft.log.info(`[PlaylistManager] Prefetch next song index=${nextIdx} title=${nextSong.title}`);
+    // 捕获到局部常量：跨 async 边界后 TS 不再对 nextSong.url 做非空收窄。
+    const songUrl = nextSong.url;
+    const title = nextSong.title;
+
+    void (async () => {
+      let forceMp3 = false;
+      try {
+        const config = await this.configManager.getConfig();
+        forceMp3 = !!config.force_mp3;
+      } catch {
+        // 读配置失败按不强制处理，仍预热源格式
+      }
+      const separator = songUrl.includes('?') ? '&' : '?';
+      const prefetchPath = songUrl + separator + 'prefetch=1' + (forceMp3 ? '&format=mp3' : '');
+      try {
+        await callHostAPI('GET', prefetchPath, undefined, { timeoutMs: 5000 });
+        songloft.log.info(`[PlaylistManager] Prefetch next song index=${nextIdx} title=${title}${forceMp3 ? ' (mp3)' : ''}`);
+      } catch (e) {
+        songloft.log.warn('[PlaylistManager] Prefetch failed: ' + String(e));
+      }
+    })();
   }
 
   /**
