@@ -110,12 +110,162 @@ function player(readState, { duration = 300, seek = 0, speed = 1 } = {}) {
 
 const playing = position => ({ status: 1, position, duration: 300, hasPosition: true });
 
-test('a hung cloud query delays the metadata fallback by at most one second', async () => {
+test('issue 495 waits for an episode with 2.6 seconds left despite a mismatched device duration', async () => {
+  await withClock(async h => {
+    const deadlineAt = Date.now() + 100;
+    const p = player(async () => ({
+      status: 1, position: Math.min(764, 761.385 + Math.max(0, Date.now() - deadlineAt) / 1000),
+      duration: 900, hasPosition: true, sampledAt: Date.now(),
+    }), { duration: 764 });
+    p.manager.startCheckTimer(0.1);
+    await h.advance(100);
+    assert.equal(p.finished(), 0);
+    assert.ok(h.logs.some(l => l.includes('Timer retry:') && l.includes('remaining=2.6s') && l.includes('streamMatch=foreign')));
+    await h.advance(2615);
+    assert.equal(p.finished(), 0);
+    await h.advance(2385);
+    assert.equal(p.finished(), 1);
+    assert.equal(h.timers.size, 0);
+    assert.equal(p.manager.getCurrentSong().duration, 764);
+  });
+});
+
+for (const speed of [0.5, 1, 2]) {
+  test(`continuous tail progress with a mismatched duration respects seek and speed ${speed}`, async () => {
+    await withClock(async h => {
+      let position = (761.385 - 500) / speed;
+      const p = player(async () => ({
+        status: 1, position, duration: 900 / speed, hasPosition: true, sampledAt: Date.now(),
+      }), { duration: 764, seek: 500, speed });
+      p.manager.startCheckTimer(0.1);
+      await h.advance(100);
+      assert.equal(p.finished(), 0);
+      position += 1 / speed;
+      await h.advance(5000);
+      assert.equal(p.finished(), 0);
+      assert.ok(h.logs.some(l => l.includes('Timer deferred:')));
+      position = (764 - 500) / speed;
+      await h.advance(Math.ceil(1615 / speed));
+      assert.equal(p.finished(), 1);
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+for (const signal of ['cached', 'frozen', 'jumped', 'voice suspended', 'mid-song']) {
+  test(`mismatched duration cannot establish current tail progress from ${signal} evidence`, async () => {
+    await withClock(async h => {
+      const startedAt = Date.now();
+      const p = player(async () => ({
+        status: 1,
+        position: signal === 'mid-song' ? 100 + (Date.now() - startedAt) / 1000
+          : signal === 'frozen' ? 297
+            : signal === 'jumped' && Date.now() - startedAt > 100 ? 400
+              : 297 + Math.min(3, (Date.now() - startedAt) / 1000),
+        duration: 500, hasPosition: true,
+        sampledAt: signal === 'cached' ? startedAt : Date.now(),
+      }));
+      p.manager.startCheckTimer(0.1);
+      if (signal === 'voice suspended') p.manager.voiceSuspendedAt = Date.now();
+      await h.advance(5100);
+      assert.equal(p.finished(), 0);
+      assert.equal(h.logs.filter(l => l.includes('Timer deferred:')).length, 0);
+      await h.advance(25000);
+      assert.equal(p.finished(), 1);
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+test('a three-second cloud response is consumed before considering fallback', async () => {
   await withClock(async h => {
     const slow = deferred();
     const p = player(() => slow.promise);
     p.manager.startCheckTimer(0.1);
-    await h.advance(1099);
+    await h.advance(3100);
+    assert.equal(p.finished(), 0);
+    slow.resolve({ ...playing(280), sampledAt: Date.now() });
+    await flush();
+    assert.equal(p.finished(), 0);
+    assert.ok(h.logs.some(l => l.includes('Timer deferred:')));
+    p.manager.stopCheckTimer();
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+for (const interruption of ['query failure', 'missing position', 'stopped']) {
+  test(`unusable ${interruption} samples break mismatched-duration tail continuity`, async () => {
+    await withClock(async h => {
+      let phase = 0;
+      const p = player(async () => {
+        if (phase === 1 && interruption === 'query failure') throw new Error('cloud failure');
+        return {
+          ...playing(phase === 2 ? 300 : 297), duration: 500, sampledAt: Date.now(),
+          hasPosition: !(phase === 1 && interruption === 'missing position'),
+          status: phase === 1 && interruption === 'stopped' ? 2 : 1,
+        };
+      });
+      p.manager.startCheckTimer(0.1);
+      await h.advance(100);
+      phase = 1;
+      await h.advance(5000);
+      phase = 2;
+      await h.advance(5000);
+      assert.equal(p.finished(), 0);
+      assert.equal(h.logs.filter(l => l.includes('Timer deferred:')).length, 0);
+      await h.advance(20000);
+      assert.equal(p.finished(), 1);
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+test('cloud recovery during grace resumes progress checks without cutting the episode', async () => {
+  await withClock(async h => {
+    let unavailable = true;
+    const startedAt = Date.now();
+    const p = player(async () => {
+      if (unavailable) throw new Error('temporary cloud failure');
+      return { ...playing(Math.min(300, 290 + (Date.now() - startedAt) / 1000)), sampledAt: Date.now() };
+    });
+    p.manager.startCheckTimer(0.1);
+    await h.advance(100);
+    assert.equal(p.finished(), 0);
+    unavailable = false;
+    await h.advance(5000);
+    assert.equal(p.finished(), 0);
+    await h.advance(4900);
+    assert.equal(p.finished(), 1);
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+for (const reset of ['pause', 'same-song restart']) {
+  test(`a scheduled deadline retry cannot affect playback after ${reset}`, async () => {
+    await withClock(async h => {
+      const p = player(async () => ({ ...playing(297), duration: 500 }));
+      p.manager.startCheckTimer(0.1);
+      await h.advance(100);
+      assert.ok(p.manager.deadlineGraceDeadlineMs > 0);
+      p.manager.stopCheckTimer();
+      if (reset === 'pause') p.manager.state = 'paused';
+      else p.manager.startCheckTimer(60);
+      assert.equal(p.manager.deadlineSamplePosition, -1);
+      assert.equal(p.manager.deadlineGraceDeadlineMs, 0);
+      await h.advance(30000);
+      assert.equal(p.finished(), 0);
+      p.manager.stopCheckTimer();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+test('a hung cloud query gets a bounded grace period and late results cannot advance twice', async () => {
+  await withClock(async h => {
+    const slow = deferred();
+    const p = player(() => slow.promise);
+    p.manager.startCheckTimer(0.1);
+    await h.advance(35099);
     assert.equal(p.finished(), 0);
     await h.advance(1);
     assert.equal(p.finished(), 1);
@@ -127,7 +277,7 @@ test('a hung cloud query delays the metadata fallback by at most one second', as
   });
 });
 
-test('timed-out early calibration preserves the original metadata fallback', async () => {
+test('timed-out early calibration cannot bypass the metadata deadline and its grace period', async () => {
   await withClock(async h => {
     const slow = deferred();
     const p = player(() => slow.promise);
@@ -136,6 +286,10 @@ test('timed-out early calibration preserves the original metadata fallback', asy
     await h.advance(4999);
     assert.equal(p.finished(), 0);
     await h.advance(1001);
+    assert.equal(p.finished(), 0);
+    await h.advance(29099);
+    assert.equal(p.finished(), 0);
+    await h.advance(1);
     assert.equal(p.finished(), 1);
     slow.resolve(playing(300));
     await flush();
@@ -276,7 +430,7 @@ test('slow tail queries bring the check forward but cannot prove the song finish
 });
 
 for (const signal of ['query failed', 'status unknown', 'position missing', 'foreign media', 'frozen']) {
-  test(`early calibrated checks retain the original fallback when ${signal}`, async () => {
+  test(`early calibrated checks retain the metadata deadline and bounded grace when ${signal}`, async () => {
     await withClock(async h => {
       let position = 295;
       let useFailure = false;
@@ -300,6 +454,8 @@ for (const signal of ['query failed', 'status unknown', 'position missing', 'for
       assert.equal(p.manager.checkTimerFallbackDeadlineMs, fallback);
       assert.equal(p.manager.checkTimerDeadlineMs, fallback);
       await h.advance(5999);
+      assert.equal(p.finished(), 0);
+      await h.advance(30000);
       assert.equal(p.finished(), 1);
       assert.equal(h.timers.size, 0);
     });
@@ -621,11 +777,15 @@ test('slow tail queries never overlap and schedule only one next poll', async ()
   });
 });
 
-test('missing device evidence leaves the metadata timer as the upper bound', async () => {
+test('missing device evidence retries for thirty seconds after the metadata deadline', async () => {
   await withClock(async h => {
     const p = player(async () => ({ status: -1, position: 0, duration: 0 }));
     p.manager.startCheckTimer(10);
     await h.advance(9999);
+    assert.equal(p.finished(), 0);
+    await h.advance(1);
+    assert.equal(p.finished(), 0);
+    await h.advance(29999);
     assert.equal(p.finished(), 0);
     await h.advance(1);
     assert.equal(p.finished(), 1);
@@ -801,6 +961,8 @@ test('a frozen mid-tail position cannot defer the metadata deadline indefinitely
     await h.advance(100);
     assert.equal(p.finished(), 0);
     await h.advance(20000);
+    assert.equal(p.finished(), 0);
+    await h.advance(30000);
     assert.equal(p.finished(), 1);
     assert.equal(h.timers.size, 0);
   });
@@ -825,11 +987,13 @@ for (const state of [
   { status: 1, position: NaN, duration: 300, hasPosition: true },
   { status: 1, position: 100, duration: 500, hasPosition: true },
 ]) {
-  test(`deadline falls back for unusable evidence ${JSON.stringify(state)}`, async () => {
+  test(`deadline retries before falling back for unusable evidence ${JSON.stringify(state)}`, async () => {
     await withClock(async h => {
       const p = player(async () => state);
       p.manager.startCheckTimer(0.1);
       await h.advance(100);
+      assert.equal(p.finished(), 0);
+      await h.advance(30000);
       assert.equal(p.finished(), 1);
       assert.equal(h.timers.size, 0);
     });
@@ -874,14 +1038,20 @@ test('tail and deadline share a slow query and advance only once', async () => {
   });
 });
 
-test('deadline query failure uses metadata and clears all pending probes', async () => {
+test('deadline query failure retries every five seconds then clears all pending probes', async () => {
   await withClock(async h => {
     const p = player(async () => { throw new Error('cloud unavailable'); });
     p.manager.startCheckTimer(0.1);
     await h.advance(100);
+    const checksAtDeadline = h.logs.filter(l => l.includes('Timer fired')).length;
+    assert.equal(p.finished(), 0);
+    await h.advance(4999);
+    assert.equal(h.logs.filter(l => l.includes('Timer fired')).length, checksAtDeadline);
+    await h.advance(25001);
     assert.equal(p.finished(), 1);
     assert.equal(h.timers.size, 0);
-    assert.ok(h.logs.some(l => l.includes('Timer advancing: device query failed')));
+    assert.ok(h.logs.some(l => l.includes('Timer retry:') && l.includes('cloud unavailable')));
+    assert.ok(h.logs.some(l => l.includes('Timer advancing: device end verification grace expired')));
   });
 });
 

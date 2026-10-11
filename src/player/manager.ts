@@ -122,7 +122,7 @@ const LOOP_DETECT_RESET_THRESHOLD_SEC = 3;
  * 而插件仍死等定时器到点，用户听到「一首播完又重播/停滞 1~2 秒才切歌」。靠调负 offset
  * 只能盲盖固定差值：小了盖不全、大了误切尾部（#481 用户实测 -2 仍有残留）。
  *
- * 主定时器到点也核对设备进度（#495）：设备仍未播完时延后，无有效进度时按元数据兜底。
+ * 主定时器到点也核对设备进度（#495）：设备仍未播完时延后，无有效证据时重试后再兜底。
  * 另在最后一段窗口内起一轮轻量探测，一旦读到设备**真实已结束**的证据就提前切歌，
  * 缩短已循环/停滞到切歌的窗口。复用 duration==0 兜底探测里已验证的「循环回零」判据，
  * 另补「设备已停」和「结尾停滞」两条，覆盖 #481 描述的两种表现（重播 / 停滞）。
@@ -132,8 +132,11 @@ const LOOP_DETECT_RESET_THRESHOLD_SEC = 3;
 const TAIL_PROBE_WINDOW_SEC = 15;
 /** 本地检查间隔；Mina 统一每五秒采样，重复采样不作为新结束证据。 */
 const TAIL_PROBE_INTERVAL_MS = 1000;
-/** 到点校验只等待短暂窗口；HTTP 仍由宿主的真实网络超时取消。 */
-const DEADLINE_QUERY_WAIT_MS = 1000;
+/** 与 Mina 的 HTTP 超时对齐，避免正常的秒级云端响应尚未返回就切歌。 */
+const DEADLINE_QUERY_WAIT_MS = 5000;
+const DEADLINE_RETRY_MS = 5000;
+/** 查询失败、冻结或流长不匹配不能立即证明结束，也不能无限阻塞队列。 */
+const DEADLINE_GRACE_MS = 30000;
 /** 设备进度保留毫秒：流内推进 100ms 即视为在播放，容忍少量上报抖动。 */
 const TAIL_STALL_ADVANCE_MIN_SEC = 0.1;
 /** 持续停滞的最低墙钟时长：保留原来 3 秒 × 2 轮的等待，不能随轮询加速缩短 */
@@ -353,6 +356,9 @@ export class PlaylistManager {
   private tailProbeQuery: Promise<DevicePlayState> | null = null; // 尾部探测与到点校验共享在途查询
   private cancelDeadlineQuery: (() => void) | null = null;
   private deadlineLastPosition: number = -1; // 上次延期位置，重复的冻结上报不能无限延期
+  private deadlineSamplePosition: number = -1;
+  private deadlineSampleAtMs: number = -1;
+  private deadlineGraceDeadlineMs: number = 0;
   private landingVerifyTimer: any = null; // 定时器ID（起播确认探测，见 LANDING_VERIFY_* 常量）
   private landingFailureCount: number = 0; // 连续起播失败次数（#466 熔断），任何一次确认成功即清零
   private unplayableSongs = new Map<number, { reason: SongFailureReason; expiresAt: number }>();
@@ -2163,6 +2169,7 @@ export class PlaylistManager {
    */
   private calibrateTailDeadline(st: DevicePlayState, queryStartedAt: number, checkedAt: number): void {
     if (this.checkTimer === null || this.transitionOffset < 0 || this.isVoiceSuspended()) return;
+    if (this.deadlineGraceDeadlineMs > 0) return;
     if (!st.hasPosition || st.status < 0 || this.tailProbeLastPosition < 0 ||
       this.matchDeviceStream({ ...st, status: 1 }) === 'foreign') return;
     const advance = st.position - this.tailProbeLastPosition;
@@ -2193,7 +2200,7 @@ export class PlaylistManager {
     return pending;
   }
 
-  private getDeadlineDeviceState(): Promise<DevicePlayState> {
+  private getDeadlineDeviceState(waitMs = DEADLINE_QUERY_WAIT_MS): Promise<DevicePlayState> {
     const pending = this.getTailDeviceState(true);
     return new Promise((resolve, reject) => {
       const cleanup = () => {
@@ -2206,8 +2213,8 @@ export class PlaylistManager {
       };
       const timer = setTimeout(() => {
         cleanup();
-        reject(new Error('device query exceeded one-second deadline budget'));
-      }, DEADLINE_QUERY_WAIT_MS);
+        reject(new Error('device query exceeded deadline budget'));
+      }, waitMs);
       this.cancelDeadlineQuery = cancel;
       pending.then(state => {
         cleanup();
@@ -2229,7 +2236,7 @@ export class PlaylistManager {
       : song.duration;
   }
 
-  /** 定时器到点不等于设备播完：核对实际位置后决定延期或使用原有时长兜底（#495）。 */
+  /** 定时器到点不等于设备播完：核对实际位置，不确定时有限重试（#495）。 */
   private async verifyTimerDeadline(): Promise<void> {
     if (this.state !== 'playing') return;
     const song = this.getCurrentSong();
@@ -2243,9 +2250,13 @@ export class PlaylistManager {
     let deviceEnded = false;
 
     // 负偏移是用户显式要求提前切歌，不用设备结尾反过来覆盖这个配置。
-    if (this.transitionOffset >= 0) {
+    if (this.transitionOffset >= 0 &&
+      (this.deadlineGraceDeadlineMs === 0 || Date.now() < this.deadlineGraceDeadlineMs)) {
       try {
-        const st = await this.getDeadlineDeviceState();
+        const waitMs = this.deadlineGraceDeadlineMs > 0
+          ? Math.min(DEADLINE_QUERY_WAIT_MS, this.deadlineGraceDeadlineMs - Date.now())
+          : DEADLINE_QUERY_WAIT_MS;
+        const st = await this.getDeadlineDeviceState(waitMs);
         if (this.state !== 'playing' || this.currentIndex !== indexAtCheck || this.checkTimerGeneration !== generationAtCheck) return;
         const validPosition = st.hasPosition && Number.isFinite(st.position) && st.position >= 0;
         const looped = maxPosition >= LOOP_DETECT_MIN_ADVANCE_SEC && st.position < LOOP_DETECT_RESET_THRESHOLD_SEC;
@@ -2257,24 +2268,48 @@ export class PlaylistManager {
         const duration = Math.max(song.duration, this.getTailDuration(st));
         const remaining = duration + this.transitionOffset - devicePosition;
         const streamMatch = this.matchDeviceStream({ ...st, status: 1 });
-        deviceEnded = validPosition && st.status >= 0 && streamMatch !== 'foreign' &&
+        const sampleAt = st.sampledAt ?? Date.now();
+        const fresh = sampleAt > this.deadlineSampleAtMs;
+        const sampleElapsed = (sampleAt - this.deadlineSampleAtMs) / 1000;
+        const sampleAdvance = st.position - this.deadlineSamplePosition;
+        // 流长只能辅助识别媒体。曲末附近连续新采样持续推进且没有明显跳跃时，
+        // 允许设备时长失准；曲中接管、位置跳跃、冻结与重复缓存均不能走此分支。
+        const continuousTail = validPosition && fresh && st.status === 1 && !this.isVoiceSuspended() &&
+          this.deadlineSamplePosition >= 0 && sampleAdvance >= TAIL_STALL_ADVANCE_MIN_SEC &&
+          sampleAdvance <= sampleElapsed + 1 &&
+          this.deadlineSamplePosition * this.playbackSpeed + this.streamSeekOffsetSec >= song.duration - TAIL_PROBE_WINDOW_SEC &&
+          devicePosition <= song.duration + TAIL_PROBE_WINDOW_SEC;
+        const usableStream = streamMatch !== 'foreign' || continuousTail;
+        if (fresh) {
+          this.deadlineSamplePosition = validPosition && st.status === 1 ? st.position : -1;
+          this.deadlineSampleAtMs = sampleAt;
+        }
+        deviceEnded = fresh && validPosition && st.status >= 0 && usableStream &&
           (looped || devicePosition >= duration);
-        if (validPosition && stillPlaying && !looped && progressedSinceDeadline &&
-          streamMatch !== 'foreign' && devicePosition < duration && remaining > 0) {
+        if (fresh && validPosition && stillPlaying && !looped && progressedSinceDeadline &&
+          usableStream && devicePosition < duration && remaining > 0) {
           this.playStartTimeMs = Date.now() - devicePosition / this.playbackSpeed * 1000;
+          const samplePosition = this.deadlineSamplePosition;
+          const sampleTime = this.deadlineSampleAtMs;
           this.startCheckTimer(remaining / this.playbackSpeed);
           this.checkTimerFallbackDeadlineMs = Math.max(this.checkTimerFallbackDeadlineMs, fallbackAtCheck);
           this.deadlineLastPosition = st.position;
+          this.deadlineSamplePosition = samplePosition;
+          this.deadlineSampleAtMs = sampleTime;
           this.tailProbeMaxPosition = Math.max(maxPosition, st.position);
           songloft.log.info(`[PlaylistManager] Timer deferred: devicePosition=${devicePosition.toFixed(1)}s remaining=${remaining.toFixed(1)}s speed=${this.playbackSpeed}`);
           return;
         }
-        reason = `status=${st.status} streamPosition=${st.position}s hasPosition=${st.hasPosition} remaining=${remaining.toFixed(1)}s looped=${looped} progressed=${progressedSinceDeadline}`;
+        reason = `status=${st.status} streamPosition=${st.position}s streamDuration=${st.duration}s streamMatch=${streamMatch} hasPosition=${st.hasPosition} remaining=${remaining.toFixed(1)}s looped=${looped} progressed=${progressedSinceDeadline} fresh=${fresh} continuousTail=${continuousTail}`;
       } catch (e) {
+        if (this.state !== 'playing' || this.currentIndex !== indexAtCheck || this.checkTimerGeneration !== generationAtCheck) return;
+        this.deadlineSamplePosition = -1;
         reason = 'device query failed: ' + String(e);
       }
-    } else {
+    } else if (this.transitionOffset < 0) {
       reason = 'configured negative transition offset';
+    } else {
+      reason = 'device end verification grace expired';
     }
 
     if (this.state !== 'playing' || this.currentIndex !== indexAtCheck || this.checkTimerGeneration !== generationAtCheck) return;
@@ -2283,6 +2318,15 @@ export class PlaylistManager {
       this.scheduleDeadlineCheck(fallbackAtCheck - Date.now());
       songloft.log.info(`[PlaylistManager] Early check waiting for fallback: ${reason}`);
       return;
+    }
+    if (!deviceEnded && this.transitionOffset >= 0) {
+      if (this.deadlineGraceDeadlineMs === 0) this.deadlineGraceDeadlineMs = Date.now() + DEADLINE_GRACE_MS;
+      const graceLeft = this.deadlineGraceDeadlineMs - Date.now();
+      if (graceLeft > 0) {
+        this.scheduleDeadlineCheck(Math.min(DEADLINE_RETRY_MS, graceLeft));
+        songloft.log.info(`[PlaylistManager] Timer retry: graceRemainingMs=${graceLeft} ${reason}`);
+        return;
+      }
     }
     songloft.log.info('[PlaylistManager] Timer advancing: ' + reason);
     this.stopCheckTimer();
@@ -2801,6 +2845,9 @@ export class PlaylistManager {
     this.tailProbeStopMisses = 0;
     this.tailProbeQuery = null;
     this.deadlineLastPosition = -1;
+    this.deadlineSamplePosition = -1;
+    this.deadlineSampleAtMs = -1;
+    this.deadlineGraceDeadlineMs = 0;
     if (this.landingVerifyTimer !== null) {
       clearTimeout(this.landingVerifyTimer);
       this.landingVerifyTimer = null;

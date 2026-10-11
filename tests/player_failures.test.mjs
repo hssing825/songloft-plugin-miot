@@ -869,6 +869,9 @@ test('metadata completion cannot reset consecutive failures without device confi
     manager.playCurrent = async () => true;
     manager.startCheckTimer(5);
     await h.advance(5000);
+    assert.equal(manager.isSongUnplayable(16), true);
+    assert.equal(manager.landingFailureCount, 2);
+    await h.advance(30000);
     assert.equal(manager.isSongUnplayable(16), false);
     assert.equal(manager.landingFailureCount, 2);
     manager.cleanup();
