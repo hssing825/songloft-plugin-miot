@@ -396,9 +396,10 @@ export class MinaHTTPClient {
    * 统一带日志标签，并按设备级返回码判定成功：只看 ubus 外层 code 会把
    * 「云端受理了但音箱拒绝执行」也当成功，导致暂停等操作静默失效。
    */
-  private async playerOperation(deviceId: string, action: 'play' | 'pause' | 'stop'): Promise<boolean> {
+  private async playerOperation(deviceId: string, action: 'play' | 'pause' | 'stop', isCurrent?: () => boolean): Promise<boolean> {
     const message = { action, media: 'app_ios' };
-    const result = await this.ubusRequest(deviceId, 'player_play_operation', 'mediaplayer', message, 'play-op:' + action);
+    const result = await this.ubusRequest(deviceId, 'player_play_operation', 'mediaplayer', message, 'play-op:' + action, isCurrent);
+    if (isCurrent?.() === false) return false;
     return this.isDeviceResultOK(result, 'player_play_operation:' + action);
   }
 
@@ -460,6 +461,16 @@ export class MinaHTTPClient {
     // 部分小爱音箱型号单独调用 stop 不会真正停止播放，先暂停再停止
     await this.playerPause(deviceId);
     return this.playerOperation(deviceId, 'stop');
+  }
+
+  /** 中断回答专用：每条指令在设备队列内发送前检查是否已被新操作取代。 */
+  async playerStopGuarded(deviceId: string, isCurrent: () => boolean): Promise<'stopped' | 'failed' | 'cancelled'> {
+    if (!isCurrent()) return 'cancelled';
+    await this.playerOperation(deviceId, 'pause', isCurrent);
+    if (!isCurrent()) return 'cancelled';
+    const stopped = await this.playerOperation(deviceId, 'stop', isCurrent);
+    if (!isCurrent()) return 'cancelled';
+    return stopped ? 'stopped' : 'failed';
   }
 
   /**
@@ -717,10 +728,12 @@ export class MinaHTTPClient {
   /**
    * 执行 UBus 请求
    */
-  async ubusRequest(deviceId: string, method: string, path: string, message: Record<string, unknown>, logLabel = ''): Promise<UbusResponse | null> {
+  async ubusRequest(deviceId: string, method: string, path: string, message: Record<string, unknown>, logLabel = '', isCurrent?: () => boolean): Promise<UbusResponse | null> {
     if (method === 'player_get_play_status') return this.getPlayerStatus(deviceId);
     this.getStatusQuery(deviceId).revision++;
-    return this.enqueueUbus(deviceId, false, () => this.doUbusRequest(deviceId, method, path, message, logLabel));
+    return this.enqueueUbus(deviceId, false, () => isCurrent?.() === false
+      ? Promise.resolve(null)
+      : this.doUbusRequest(deviceId, method, path, message, logLabel, isCurrent));
   }
 
   private enqueueUbus(deviceId: string, status: boolean, run: UbusTask['run']): Promise<UbusResponse | null> {
@@ -755,7 +768,7 @@ export class MinaHTTPClient {
     }
   }
 
-  private async doUbusRequest(deviceId: string, method: string, path: string, message: Record<string, unknown>, logLabel = ''): Promise<UbusResponse | null> {
+  private async doUbusRequest(deviceId: string, method: string, path: string, message: Record<string, unknown>, logLabel = '', isCurrent?: () => boolean): Promise<UbusResponse | null> {
     const apiUrl = `${MINA_API_BASE_URL}/remote/ubus`;
     const requestId = this.generateRequestId();
 
@@ -775,7 +788,7 @@ export class MinaHTTPClient {
       songloft.log.info(`[MinaClient] ${logLabel} ubus request device=${deviceId} path=${path} method=${method} request_id=${requestId} message=${this.summarizeUbusMessageForLog(message)}`);
     }
 
-    const result = await this.doPostRequest<UbusResponse>(apiUrl, body, logLabel, undefined, UBUS_TIMEOUT_MS);
+    const result = await this.doPostRequest<UbusResponse>(apiUrl, body, logLabel, undefined, UBUS_TIMEOUT_MS, isCurrent);
 
     // 如果401并且有回调，尝试刷新
     if (result === null) {
@@ -894,7 +907,8 @@ export class MinaHTTPClient {
   /**
    * 执行 POST 请求（带401重试）
    */
-  private async doPostRequest<T>(url: string, body: string, logLabel = '', transformResponseText?: (text: string) => string, timeoutMs?: number): Promise<T | null> {
+  private async doPostRequest<T>(url: string, body: string, logLabel = '', transformResponseText?: (text: string) => string, timeoutMs?: number, isCurrent?: () => boolean): Promise<T | null> {
+    if (isCurrent?.() === false) return null;
     const headers: Record<string, string> = {
       'User-Agent': this.userAgent,
       'Content-Type': 'application/x-www-form-urlencoded',
@@ -924,7 +938,8 @@ export class MinaHTTPClient {
       if (this.onTokenExpired) {
         const refreshed = await this.onTokenExpired();
         if (refreshed) {
-          // 重试
+          // token 刷新期间可能收到新播放操作，旧中断指令不得重发。
+          if (isCurrent?.() === false) return null;
           headers['Cookie'] = this.buildApiCookies();
           try {
             const retryResult = await fetchWithRedirects(url, { method: 'POST', headers, body }, new CookieJar(), 0);

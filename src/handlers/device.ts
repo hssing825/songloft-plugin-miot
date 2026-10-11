@@ -30,6 +30,7 @@ function parseBody(req: HTTPRequest): any {
  * POST /mina/pause           → 暂停播放
  * POST /mina/resume          → 恢复播放
  * POST /mina/stop            → 停止播放
+ * POST /mina/interrupt       → 中断回答（间隔两秒停止两次）
  * POST /mina/device/managed  → 更新管理状态
  * POST /mina/last_selection  → 记录最后选中设备
  */
@@ -212,6 +213,30 @@ export function registerDeviceHandlers(
       }
       updateDeviceStatusCache(account_id, device_id, { state: 'stopped', position: 0 });
       return jsonResponse({ success: true, data: { message: 'stopped' } });
+    } catch (e: any) {
+      return jsonResponse({ success: false, error: e.message || String(e) });
+    }
+  });
+
+  // POST /mina/interrupt - 两轮停止中断回答；指令应答不代表已核验静音。
+  router.post('/mina/interrupt', async (req: HTTPRequest) => {
+    try {
+      const { account_id, device_id } = parseBody(req);
+      if (typeof account_id !== 'string' || !account_id.trim()) {
+        return jsonResponse({ success: false, error: 'account_id is required' });
+      }
+      if (typeof device_id !== 'string' || !device_id.trim()) {
+        return jsonResponse({ success: false, error: 'device_id is required' });
+      }
+      const result = await minaService.interruptAnswer(account_id, device_id);
+      if (result.status !== 'accepted') {
+        return jsonResponse({
+          success: false,
+          error: result.status === 'cancelled' ? 'interrupt superseded by a newer operation' : 'failed to interrupt',
+          data: { stop_rounds: result.stop_rounds, cancelled: result.status === 'cancelled' },
+        });
+      }
+      return jsonResponse({ success: true, data: { message: 'interrupt commands accepted', stop_rounds: result.stop_rounds, cancelled: false } });
     } catch (e: any) {
       return jsonResponse({ success: false, error: e.message || String(e) });
     }
