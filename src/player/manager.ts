@@ -2203,24 +2203,34 @@ export class PlaylistManager {
   private getDeadlineDeviceState(waitMs = DEADLINE_QUERY_WAIT_MS): Promise<DevicePlayState> {
     const pending = this.getTailDeviceState(true);
     return new Promise((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
       const cleanup = () => {
-        clearTimeout(timer);
+        if (settled) return false;
+        settled = true;
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
         if (this.cancelDeadlineQuery === cancel) this.cancelDeadlineQuery = null;
+        return true;
       };
       const cancel = () => {
-        cleanup();
+        if (!cleanup()) return;
         resolve({ status: -1, position: 0, duration: 0, hasPosition: false });
       };
-      const timer = setTimeout(() => {
-        cleanup();
+      timer = setTimeout(() => {
+        // 超时已触发，旧宿主会立即复用句柄；不要再取消它。
+        timer = null;
+        if (!cleanup()) return;
         reject(new Error('device query exceeded deadline budget'));
       }, waitMs);
       this.cancelDeadlineQuery = cancel;
       pending.then(state => {
-        cleanup();
+        if (!cleanup()) return;
         resolve(state);
       }, error => {
-        cleanup();
+        if (!cleanup()) return;
         reject(error);
       });
     });

@@ -63,13 +63,17 @@ async function withClock(run) {
   let now = 100000;
   let timerId = 0;
   const timers = new Map();
+  const clears = [];
   const logs = [];
   Date.now = () => now;
   globalThis.setTimeout = (fn, delay) => {
     timers.set(++timerId, { fn, at: now + delay });
     return timerId;
   };
-  globalThis.clearTimeout = id => timers.delete(id);
+  globalThis.clearTimeout = id => {
+    clears.push(id);
+    return timers.delete(id);
+  };
   globalThis.songloft = {
     log: Object.fromEntries(['info', 'warn', 'error'].map(level => [level, message => logs.push(message)])),
   };
@@ -88,7 +92,7 @@ async function withClock(run) {
     await flush();
   };
   try {
-    await run({ timers, logs, advance });
+    await run({ timers, clears, logs, advance });
   } finally {
     globalThis.setTimeout = original.setTimeout;
     globalThis.clearTimeout = original.clearTimeout;
@@ -109,6 +113,73 @@ function player(readState, { duration = 300, seek = 0, speed = 1 } = {}) {
 }
 
 const playing = position => ({ status: 1, position, duration: 300, hasPosition: true });
+
+for (const lateOutcome of ['success', 'failure']) {
+  for (const completion of ['timeout', 'cancel']) {
+    test(`issue 514 ${completion} ignores late ${lateOutcome} without clearing an expired handle`, async () => {
+      await withClock(async h => {
+        const slow = deferred();
+        const p = player(() => slow.promise);
+        const outcomes = [];
+        const query = p.manager.getDeadlineDeviceState(100).then(
+          state => outcomes.push(state.status),
+          error => outcomes.push(error.message),
+        );
+        const [deadlineTimer] = h.timers.keys();
+        const cancel = p.manager.cancelDeadlineQuery;
+        if (completion === 'timeout') await h.advance(100);
+        else {
+          cancel();
+          await flush();
+        }
+        assert.deepEqual(outcomes, completion === 'timeout' ? ['device query exceeded deadline budget'] : [-1]);
+        assert.equal(p.manager.cancelDeadlineQuery, null);
+        assert.deepEqual(h.clears, completion === 'timeout' ? [] : [deadlineTimer]);
+
+        let listenerTicks = 0;
+        const poll = () => {
+          listenerTicks++;
+          if (listenerTicks < 2) setTimeout(poll, 10);
+        };
+        setTimeout(poll, 10);
+        cancel();
+        if (lateOutcome === 'success') slow.resolve(playing(300));
+        else slow.reject(new Error('late cloud failure'));
+        await flush();
+        await query;
+        assert.deepEqual(h.clears, completion === 'timeout' ? [] : [deadlineTimer]);
+        await h.advance(20);
+        assert.equal(listenerTicks, 2);
+        assert.equal(outcomes.length, 1);
+        assert.equal(h.timers.size, 0);
+      });
+    });
+  }
+}
+
+for (const outcome of ['success', 'failure']) {
+  test(`issue 514 query ${outcome} clears its active timeout exactly once`, async () => {
+    await withClock(async h => {
+      const slow = deferred();
+      const p = player(() => slow.promise);
+      const query = p.manager.getDeadlineDeviceState(100);
+      const [deadlineTimer] = h.timers.keys();
+      const cancel = p.manager.cancelDeadlineQuery;
+      if (outcome === 'success') {
+        slow.resolve(playing(12));
+        assert.equal((await query).position, 12);
+      } else {
+        const rejected = assert.rejects(query, /cloud failure/);
+        slow.reject(new Error('cloud failure'));
+        await rejected;
+      }
+      cancel();
+      assert.deepEqual(h.clears, [deadlineTimer]);
+      assert.equal(p.manager.cancelDeadlineQuery, null);
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
 
 test('issue 495 waits for an episode with 2.6 seconds left despite a mismatched device duration', async () => {
   await withClock(async h => {
