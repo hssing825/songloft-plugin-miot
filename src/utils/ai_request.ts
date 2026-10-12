@@ -11,7 +11,7 @@ interface AIRequestOptions {
 }
 
 interface AIRequestContext {
-  kind: 'analysis' | 'models';
+  kind: 'analysis' | 'models' | 'chat' | 'summary' | 'memory';
   model?: string;
   thinkingDisabled?: boolean;
   queryChars?: number;

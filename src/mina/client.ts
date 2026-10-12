@@ -168,7 +168,7 @@ export class MinaHTTPClient {
    *   逐首搜云端曲库匹配真实 audioID（搜不到回退 customAudioId），使触屏音箱显示歌词。
    *   参考 xiaomusic：player_play_music 有兼容性风险，非兼容型号仍走 player_play_url。
    */
-  async playByUrl(deviceId: string, url: string, hardware = '', disabledModels?: string[], keepLight = false, customAudioId?: string, lyricsMode?: { enabled: boolean; songName?: string; metadata?: PlayMetadata }): Promise<boolean> {
+  async playByUrl(deviceId: string, url: string, hardware = '', disabledModels?: string[], keepLight = false, customAudioId?: string, lyricsMode?: { enabled: boolean; songName?: string; metadata?: PlayMetadata }, current?: () => boolean): Promise<boolean> {
     const useMusicAPI = hardware ? needUsePlayMusicAPI(hardware, disabledModels) : false;
     if (isDebugLog()) {
       const disabled = Array.isArray(disabledModels) ? disabledModels.join(',') : '';
@@ -181,32 +181,32 @@ export class MinaHTTPClient {
         const displayName = this.formatPlayMetadataForLog(lyricsMode.metadata || lyricsMode.songName || '');
         songloft.log.info(`[MinaClient] touchscreen lyrics selected audioID=${audioId} fallbackAudioID=${fallbackAudioId} song=${displayName}`);
         // xiaomusic 的 continue_play 通过 _type=1 设置 audio_type=MUSIC；这是触屏歌词/封面的前提。
-        const ok = await this.playByMusicURL(deviceId, url, true, audioId, 'play-music:lyrics');
+        const ok = await this.playByMusicURL(deviceId, url, true, audioId, 'play-music:lyrics', current);
         if (ok) {
           return true;
         }
 
         if (audioId !== fallbackAudioId) {
           songloft.log.warn(`[MinaClient] searched audioID failed, retrying default audioID=${fallbackAudioId} in touchscreen lyrics mode`);
-          const defaultLyricsOK = await this.playByMusicURL(deviceId, url, true, fallbackAudioId, 'play-music:lyrics-default');
+          const defaultLyricsOK = await this.playByMusicURL(deviceId, url, true, fallbackAudioId, 'play-music:lyrics-default', current);
           if (defaultLyricsOK) {
             return true;
           }
         }
 
         songloft.log.warn('[MinaClient] playByMusicURL failed in touchscreen lyrics mode, retrying normal Music API playback');
-        const normalMusicOK = await this.playByMusicURL(deviceId, url, keepLight, fallbackAudioId, 'play-music:fallback');
+        const normalMusicOK = await this.playByMusicURL(deviceId, url, keepLight, fallbackAudioId, 'play-music:fallback', current);
         if (normalMusicOK) {
           return true;
         }
 
         songloft.log.warn('[MinaClient] normal Music API fallback failed, trying player_play_url');
-        return this.playURL(deviceId, url, keepLight);
+        return this.playURL(deviceId, url, keepLight, current);
       }
 
-      return this.playByMusicURL(deviceId, url, keepLight, fallbackAudioId, 'play-music');
+      return this.playByMusicURL(deviceId, url, keepLight, fallbackAudioId, 'play-music', current);
     }
-    return this.playURL(deviceId, url, keepLight);
+    return this.playURL(deviceId, url, keepLight, current);
   }
 
   /**
@@ -314,19 +314,19 @@ export class MinaHTTPClient {
   /**
    * 使用 player_play_url 播放 URL
    */
-  async playURL(deviceId: string, url: string, keepLight = false): Promise<boolean> {
+  async playURL(deviceId: string, url: string, keepLight = false, current?: () => boolean): Promise<boolean> {
     if (isDebugLog()) {
       songloft.log.info(`[MinaClient] play-url stream device=${deviceId} keepLight=${keepLight} url=${this.redactAccessToken(url).slice(0, 160)}`);
     }
     const message = { url, type: keepLight ? 1 : 2, media: 'app_ios' };
-    const result = await this.ubusRequest(deviceId, 'player_play_url', 'mediaplayer', message, 'play-url');
+    const result = await this.ubusRequest(deviceId, 'player_play_url', 'mediaplayer', message, 'play-url', current);
     return this.isDeviceResultOK(result, 'player_play_url');
   }
 
   /**
    * 使用 player_play_music 播放 URL（用于部分设备型号）
    */
-  async playByMusicURL(deviceId: string, audioUrl: string, keepLight = false, customAudioId?: string, logLabel = 'play-music'): Promise<boolean> {
+  async playByMusicURL(deviceId: string, audioUrl: string, keepLight = false, customAudioId?: string, logLabel = 'play-music', current?: () => boolean): Promise<boolean> {
     // 默认封面
     const audioId = customAudioId || DEFAULT_MUSIC_AUDIO_ID;
     if (isDebugLog()) {
@@ -363,7 +363,7 @@ export class MinaHTTPClient {
       music: JSON.stringify(music),
     };
 
-    const result = await this.ubusRequest(deviceId, 'player_play_music', 'mediaplayer', message, logLabel);
+    const result = await this.ubusRequest(deviceId, 'player_play_music', 'mediaplayer', message, logLabel, current);
     const ok = this.isDeviceResultOK(result, 'player_play_music');
     // 诊断 songloft-org/songloft#453：ubus 云端汇报 success，但音箱仍无声。
     // 推送 2s 后异步回读一次真实播放状态，暴露「云端受理但设备未拉流」的静默失败。
@@ -406,15 +406,15 @@ export class MinaHTTPClient {
   /**
    * 播放操作（play）
    */
-  async playerPlay(deviceId: string): Promise<boolean> {
-    return this.playerOperation(deviceId, 'play');
+  async playerPlay(deviceId: string, isCurrent?: () => boolean): Promise<boolean> {
+    return this.playerOperation(deviceId, 'play', isCurrent);
   }
 
   /**
    * 暂停播放
    */
-  async playerPause(deviceId: string): Promise<boolean> {
-    return this.playerOperation(deviceId, 'pause');
+  async playerPause(deviceId: string, isCurrent?: () => boolean): Promise<boolean> {
+    return this.playerOperation(deviceId, 'pause', isCurrent);
   }
 
   /**
@@ -427,13 +427,14 @@ export class MinaHTTPClient {
    * @returns 'paused' 暂停已生效 | 'stopped' 已升级为停止（设备端媒体上下文丢失，无法原位续播）
    *          | 'failed' pause 与 stop 均下发失败
    */
-  async playerPauseVerified(deviceId: string): Promise<'paused' | 'stopped' | 'failed'> {
-    const pauseOK = await this.playerPause(deviceId);
+  async playerPauseVerified(deviceId: string, isCurrent?: () => boolean): Promise<'paused' | 'stopped' | 'failed'> {
+    const pauseOK = await this.playerPause(deviceId, isCurrent);
 
     // 设备状态上报有延迟：连续两次回读都仍是 playing 才判定 pause 未生效，
     // 避免误伤 pause 正常、只是状态上报慢的型号（升级 stop 会丢失续播位置）。
     for (let i = 0; i < PAUSE_VERIFY_ATTEMPTS; i++) {
       await new Promise(r => setTimeout(r, PAUSE_VERIFY_DELAY_MS));
+      if (isCurrent?.() === false) return 'failed';
       const status = await this.readPlayStatus(deviceId);
       if (status !== PLAY_STATUS_PLAYING) {
         return 'paused';
@@ -441,7 +442,7 @@ export class MinaHTTPClient {
     }
 
     songloft.log.warn(`[MinaClient] pause ignored by device=${deviceId} (still playing), escalating to stop`);
-    if (await this.playerOperation(deviceId, 'stop')) {
+    if (await this.playerOperation(deviceId, 'stop', isCurrent)) {
       return 'stopped';
     }
     return pauseOK ? 'paused' : 'failed';
@@ -450,17 +451,17 @@ export class MinaHTTPClient {
   /**
    * 恢复播放
    */
-  async playerResume(deviceId: string): Promise<boolean> {
-    return this.playerPlay(deviceId);
+  async playerResume(deviceId: string, isCurrent?: () => boolean): Promise<boolean> {
+    return this.playerPlay(deviceId, isCurrent);
   }
 
   /**
    * 停止播放
    */
-  async playerStop(deviceId: string): Promise<boolean> {
+  async playerStop(deviceId: string, isCurrent?: () => boolean): Promise<boolean> {
     // 部分小爱音箱型号单独调用 stop 不会真正停止播放，先暂停再停止
-    await this.playerPause(deviceId);
-    return this.playerOperation(deviceId, 'stop');
+    await this.playerPause(deviceId, isCurrent);
+    return this.playerOperation(deviceId, 'stop', isCurrent);
   }
 
   /** 中断回答专用：每条指令在设备队列内发送前检查是否已被新操作取代。 */
@@ -514,7 +515,7 @@ export class MinaHTTPClient {
           if (typeof parsed.volume === 'number') {
             return parsed.volume;
           }
-        } catch {}
+        } catch { }
       }
     }
     return -1;
@@ -528,7 +529,9 @@ export class MinaHTTPClient {
    * 优先走 mibrain/text_to_speech（多数固件真正的语音播报入口），
    * 失败再回退到旧的 mediaplayer/player_play_tts（部分老设备）。
    */
-  async textToSpeech(deviceId: string, text: string, options?: { hardware?: string; miotDID?: string }): Promise<boolean> {
+  async textToSpeech(deviceId: string, text: string, options?: { hardware?: string; miotDID?: string; isCurrent?: () => boolean }): Promise<boolean> {
+    const current = options?.isCurrent;
+    if (current?.() === false) return false;
     const textLength = text.length;
     const hardware = options?.hardware || '';
     const miotDID = options?.miotDID || '';
@@ -538,7 +541,7 @@ export class MinaHTTPClient {
       if (miotDID && this.hasXiaomiIOToken()) {
         try {
           songloft.log.info(`[MinaClient] textToSpeech using MiIO TTS command hardware=${hardware} did=${miotDID} command=${ttsCommand} text_length=${textLength}`);
-          const ok = await new MiIOClient(this.tokenInfo).textToSpeechByCommand(miotDID, ttsCommand, text);
+          const ok = await new MiIOClient(this.tokenInfo).textToSpeechByCommand(miotDID, ttsCommand, text, current);
           if (ok) {
             return true;
           }
@@ -551,17 +554,18 @@ export class MinaHTTPClient {
       }
     }
 
+    if (current?.() === false) return false;
     const message = { text };
     songloft.log.info(`[MinaClient] textToSpeech start device=${deviceId} hardware=${hardware} text_length=${textLength}`);
 
-    const mibrainResult = await this.ubusRequest(deviceId, 'text_to_speech', 'mibrain', message, 'tts:mibrain');
+    const mibrainResult = await this.ubusRequest(deviceId, 'text_to_speech', 'mibrain', message, 'tts:mibrain', current);
     if (mibrainResult !== null) {
       songloft.log.info(`[MinaClient] textToSpeech success endpoint=mibrain/text_to_speech device=${deviceId} code=${mibrainResult.code}`);
       return true;
     }
     songloft.log.warn(`[MinaClient] text_to_speech/mibrain failed, falling back to player_play_tts/mediaplayer device=${deviceId}`);
 
-    const fallbackResult = await this.ubusRequest(deviceId, 'player_play_tts', 'mediaplayer', message, 'tts:mediaplayer');
+    const fallbackResult = await this.ubusRequest(deviceId, 'player_play_tts', 'mediaplayer', message, 'tts:mediaplayer', current);
     if (fallbackResult !== null) {
       songloft.log.info(`[MinaClient] textToSpeech success endpoint=mediaplayer/player_play_tts device=${deviceId} code=${fallbackResult.code}`);
       return true;

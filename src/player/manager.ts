@@ -373,6 +373,7 @@ export class PlaylistManager {
   // 表现为前 20 多秒空白 + 尾部被砍）。改为先定后用：reserveNextIndex() 定一次，
   // 预热与自动切歌共用同一个结果。
   private pendingNextIndex: number = -1;
+  private voiceSuspendedPosition = 0;
   private voiceSuspendedAt: number = 0; // suspendForVoiceInteraction 首次调用时间戳
   private tempPlaylistName: string = ''; // 临时歌单名称（如"歌手: 周杰伦"），playlistId < 0 时有效
   private readonly tempId: number; // 该 manager 的固定临时歌单 ID（构造时分配，生命周期内复用）
@@ -413,6 +414,24 @@ export class PlaylistManager {
 
   // ===== 公开方法 =====
 
+  private interactionGuard?: () => void;
+  setInteractionGuard(callback: (() => void) | undefined): () => void {
+    this.interactionGuard = callback;
+    return () => { if (this.interactionGuard === callback) this.interactionGuard = undefined; };
+  }
+  private invalidateInteraction(): void {
+    const callback = this.interactionGuard; this.interactionGuard = undefined; callback?.();
+  }
+  getInteractionPosition(): number { return this.state === 'paused' ? this.pausedPositionSec : this.getPosition(); }
+  reserveForVoiceInteraction(): void {
+    if (this.isPlaying()) this.suspendForVoiceInteraction();
+    else this.stopCheckTimer();
+  }
+  async holdAfterInteraction(position: number): Promise<void> {
+    this.stopCheckTimer(); this.clearVoiceSuspend(); this.state = 'paused'; this.hardStopped = true;
+    this.pausedPositionSec = position; await this.persistState();
+  }
+
   private externalPlayback = false;
   private externalRelease: (() => void) | null = null;
   private playbackEpoch = 0;
@@ -421,6 +440,8 @@ export class PlaylistManager {
 
   /** DLNA 接管前作废歌单驱动，并等已在途的推送结束，避免云端请求反向覆盖。 */
   async beginExternalPlayback(onRelease: () => void): Promise<boolean> {
+    this.invalidateInteraction();
+    this.minaService.notifyControl?.(this.accountId, this.deviceId);
     this.externalPlayback = true;
     this.externalRelease = onRelease;
     const epoch = ++this.playbackEpoch;
@@ -438,6 +459,7 @@ export class PlaylistManager {
 
   /** 结束外部接管后仍保持歌单停止；只有新的用户播放操作才恢复驱动。 */
   endExternalPlayback(): void {
+    this.invalidateInteraction();
     if (!this.externalPlayback) return;
     this.externalPlayback = false;
     this.playbackEpoch++;
@@ -484,7 +506,8 @@ export class PlaylistManager {
    * @param opts.randomStart - 忽略 startIndex，加载歌单后随机挑一首作为起点
    * @returns 是否成功
    */
-  async play(playlistId: number, startIndex?: number, mode?: PlayMode, opts?: { randomStart?: boolean }): Promise<boolean> {
+  async play(playlistId: number, startIndex?: number, mode?: PlayMode, opts?: { randomStart?: boolean; isCurrent?: () => boolean }): Promise<boolean> {
+    if (opts?.isCurrent?.() === false) return false;
     this.endExternalPlayback();
     // 立即停止定时器和重置状态，防止 loadPlaylistSongs 期间旧定时器触发 onSongFinished
     this.stopCheckTimer();
@@ -493,7 +516,7 @@ export class PlaylistManager {
     this._lastLoadNotFound = false;
 
     // 加载歌单歌曲
-    const loaded = await this.loadPlaylistSongs(playlistId);
+    const loaded = await this.loadPlaylistSongs(playlistId, opts?.isCurrent);
     if (!loaded) {
       songloft.log.error('[PlaylistManager] play: loadPlaylistSongs returned false, playlistId=' + playlistId);
       return false;
@@ -520,7 +543,7 @@ export class PlaylistManager {
     this.clearPendingNextIndex();
 
     // 开始播放当前歌曲
-    const ok = await this.playCurrent();
+    const ok = await this.playCurrent({ isCurrent: opts?.isCurrent });
     if (!ok) {
       songloft.log.error('[PlaylistManager] Failed to play current song');
       return false;
@@ -546,7 +569,8 @@ export class PlaylistManager {
    * @param fallbackIndex - 歌单内找不到 songId 时的兜底起始下标
    * @returns 是否成功
    */
-  async playPlaylistFromSong(playlistId: number, songId: number, mode?: PlayMode, fallbackIndex?: number): Promise<boolean> {
+  async playPlaylistFromSong(playlistId: number, songId: number, mode?: PlayMode, fallbackIndex?: number, isCurrent?: () => boolean): Promise<boolean> {
+    if (isCurrent?.() === false) return false;
     this.endExternalPlayback();
     // 立即停止定时器和重置状态，防止 loadPlaylistSongs 期间旧定时器触发 onSongFinished
     this.stopCheckTimer();
@@ -554,7 +578,7 @@ export class PlaylistManager {
     this.playStartTimeMs = 0;
     this._lastLoadNotFound = false;
 
-    const loaded = await this.loadPlaylistSongs(playlistId);
+    const loaded = await this.loadPlaylistSongs(playlistId, isCurrent);
     if (!loaded) {
       songloft.log.error('[PlaylistManager] playPlaylistFromSong: loadPlaylistSongs returned false, playlistId=' + playlistId);
       return false;
@@ -582,7 +606,7 @@ export class PlaylistManager {
     this.randomPlayed = new Set();
     this.clearPendingNextIndex();
 
-    const ok = await this.playCurrent();
+    const ok = await this.playCurrent({ isCurrent: isCurrent });
     if (!ok) {
       songloft.log.error('[PlaylistManager] playPlaylistFromSong: Failed to play current song');
       return false;
@@ -599,7 +623,8 @@ export class PlaylistManager {
    * 用于"播放歌手XX的歌"等场景，将跨歌单收集的歌曲作为虚拟播放列表。
    * @param artistQuery - 歌手搜索词，用于重启后恢复
    */
-  async playWithSongs(songs: Song[], startIndex: number, mode: PlayMode, label?: string, artistQuery?: string): Promise<boolean> {
+  async playWithSongs(songs: Song[], startIndex: number, mode: PlayMode, label?: string, artistQuery?: string, isCurrent?: () => boolean): Promise<boolean> {
+    if (isCurrent?.() === false) return false;
     this.endExternalPlayback();
     this.stopCheckTimer();
     this.state = 'idle';
@@ -622,7 +647,7 @@ export class PlaylistManager {
     this.randomPlayed = new Set();
     this.clearPendingNextIndex();
 
-    const ok = await this.playCurrent();
+    const ok = await this.playCurrent({ isCurrent: isCurrent });
     if (!ok) {
       songloft.log.error('[PlaylistManager] playWithSongs: failed to play current song');
       return false;
@@ -657,11 +682,13 @@ export class PlaylistManager {
    * 逐台核验暂停是否真的生效：部分型号会受理 pause 却继续出声，此时底层已升级为 stop。
    * 只要有一台被硬停，就记下 hardStopped——设备端媒体上下文已丢失，续播必须重推 URL。
    */
-  async pause(): Promise<void> {
-    return this.trackPlayback(() => this.pauseInternal());
+  async pause(isCurrent?: () => boolean): Promise<void> {
+    if (isCurrent?.() === false) return;
+    this.invalidateInteraction();
+    return this.trackPlayback(() => this.pauseInternal(isCurrent));
   }
 
-  private async pauseInternal(): Promise<void> {
+  private async pauseInternal(isCurrent?: () => boolean): Promise<void> {
     // 先抓位置：getPosition() 在 state !== 'playing' 时恒返回 0，改状态之后就取不到了。
     // 硬停续播靠它跳回原处（songloft-org/songloft-plugin-miot#60）。
     // 判 playing 是为了让重复暂停不把已记下的位置擦成 0。
@@ -677,13 +704,13 @@ export class PlaylistManager {
     // 暂停所有目标设备（分组时为组内全部音箱）
     const results = await Promise.all(this.targets.map(async (t) => {
       try {
-        return await this.minaService.pausePlayVerified(t.account_id, t.device_id);
+        return await this.minaService.pausePlayVerified(t.account_id, t.device_id, isCurrent);
       } catch (e) {
         songloft.log.warn(`[PlaylistManager] pause failed for ${t.account_id}:${t.device_id}: ${String(e)}`);
         return 'failed' as const;
       }
     }));
-    this.hardStopped = results.includes('stopped');
+    this.hardStopped = this.hardStopped || results.includes('stopped');
 
     songloft.log.info(`[PlaylistManager] Playback paused results=${results.join(',')} hardStopped=${this.hardStopped} position=${this.pausedPositionSec.toFixed(1)}s`);
 
@@ -700,11 +727,13 @@ export class PlaylistManager {
    *   正确时是多余动作，判断错误时会把正在播放的音频真停掉（#449）。本地状态、续播锚点、
    *   外部恢复探测等收尾动作与主动停止完全一致。
    */
-  async stop(pushToDevice = true): Promise<void> {
-    return this.trackPlayback(() => this.stopInternal(pushToDevice));
+  async stop(pushToDevice = true, isCurrent?: () => boolean): Promise<void> {
+    if (isCurrent?.() === false) return;
+    this.invalidateInteraction();
+    return this.trackPlayback(() => this.stopInternal(pushToDevice, isCurrent));
   }
 
-  private async stopInternal(pushToDevice: boolean): Promise<void> {
+  private async stopInternal(pushToDevice: boolean, isCurrent?: () => boolean): Promise<void> {
     this.stopCheckTimer();
     this.clearVoiceSuspend();
     this.state = 'stopped';
@@ -714,7 +743,7 @@ export class PlaylistManager {
     this.transitionOffset = 0;
 
     if (pushToDevice) {
-      await this.forEachTarget('stop', t => this.minaService.stopPlay(t.account_id, t.device_id));
+      await this.forEachTarget('stop', t => this.minaService.stopPlay(t.account_id, t.device_id, isCurrent));
     }
 
     songloft.log.info(`[PlaylistManager] Playback stopped pushToDevice=${pushToDevice}`);
@@ -729,7 +758,8 @@ export class PlaylistManager {
    * 下一首
    * @returns 是否成功
    */
-  async next(): Promise<boolean> {
+  async next(isCurrent?: () => boolean): Promise<boolean> {
+    if (isCurrent?.() === false) return false;
     this.endExternalPlayback();
     this.stopCheckTimer();
     if (this.songs.length === 0) {
@@ -749,7 +779,7 @@ export class PlaylistManager {
     }
 
     this.currentIndex = nextIdx;
-    const ok = await this.playCurrent();
+    const ok = await this.playCurrent({ isCurrent: isCurrent });
     if (ok) {
       await this.persistState();
     }
@@ -760,7 +790,8 @@ export class PlaylistManager {
    * 上一首
    * @returns 是否成功
    */
-  async previous(): Promise<boolean> {
+  async previous(isCurrent?: () => boolean): Promise<boolean> {
+    if (isCurrent?.() === false) return false;
     this.endExternalPlayback();
     this.stopCheckTimer();
     if (this.songs.length === 0) {
@@ -775,7 +806,7 @@ export class PlaylistManager {
     }
 
     this.currentIndex = prevIdx;
-    const ok = await this.playCurrent();
+    const ok = await this.playCurrent({ isCurrent: isCurrent });
     if (ok) {
       await this.persistState();
     }
@@ -787,7 +818,8 @@ export class PlaylistManager {
    * 不重载歌单、不改播放模式，仅移动 currentIndex 并 playCurrent；
    * 越界或没有歌单时返回 false，由调用方决定给不给 TTS。
    */
-  async playAtIndex(index: number): Promise<boolean> {
+  async playAtIndex(index: number, isCurrent?: () => boolean): Promise<boolean> {
+    if (isCurrent?.() === false) return false;
     this.endExternalPlayback();
     this.stopCheckTimer();
     if (this.songs.length === 0) {
@@ -803,7 +835,7 @@ export class PlaylistManager {
     this.currentIndex = index;
     this.state = 'idle';
     this.playStartTimeMs = 0;
-    const ok = await this.playCurrent();
+    const ok = await this.playCurrent({ isCurrent: isCurrent });
     if (ok) {
       await this.persistState();
     }
@@ -1042,6 +1074,7 @@ export class PlaylistManager {
    * （`POST /player/toggle` → handlers/playlist.ts）会跟着从 ~100ms 变成 ~1.3s，手感明显发木。
    */
   async resumePlayback(opts?: { positionSec?: number; isCurrent?: () => boolean }): Promise<boolean> {
+    if (!opts?.isCurrent) { this.invalidateInteraction(); this.minaService.notifyControl?.(this.accountId, this.deviceId); }
     if (this.externalPlayback) return false;
     return this.trackPlayback(() => this.resumePlaybackInternal(opts));
   }
@@ -1070,7 +1103,7 @@ export class PlaylistManager {
     const resumeFromSec = typeof opts?.positionSec === 'number' && Number.isFinite(opts.positionSec) && opts.positionSec >= 0
       ? opts.positionSec : this.state === 'paused' ? this.pausedPositionSec : this.getPosition();
 
-    const ok = await this.forEachTarget('resume', t => this.minaService.resumePlay(t.account_id, t.device_id));
+    const ok = await this.forEachTarget('resume', t => this.minaService.resumePlay(t.account_id, t.device_id, isCurrent));
     if (!isCurrent()) return false;
     if (!ok) {
       songloft.log.warn('[PlaylistManager] resumePlay failed');
@@ -1214,6 +1247,7 @@ export class PlaylistManager {
     if (this.state !== 'playing' || this.playStartTimeMs === 0) {
       return 0;
     }
+    if (this.voiceSuspendedAt > 0) return this.voiceSuspendedPosition;
     if (this.hourlyResumeTask?.waiting) return this.hourlyResumeTask.position;
     const elapsed = ((Date.now() - this.playStartTimeMs) / 1000) * this.playbackSpeed;
     const song = this.getCurrentSong();
@@ -1302,6 +1336,7 @@ export class PlaylistManager {
   suspendForVoiceInteraction(): void {
     this.stopCheckTimer();
     if (this.voiceSuspendedAt === 0) {
+      this.voiceSuspendedPosition = this.getPosition();
       this.voiceSuspendedAt = Date.now();
     }
   }
@@ -1311,7 +1346,7 @@ export class PlaylistManager {
   }
 
   isVoiceSuspendStale(): boolean {
-    return this.voiceSuspendedAt > 0 && (Date.now() - this.voiceSuspendedAt) > 60000;
+    return !this.interactionGuard && this.voiceSuspendedAt > 0 && (Date.now() - this.voiceSuspendedAt) > 60000;
   }
 
   private clearVoiceSuspend(): void {
@@ -1369,7 +1404,7 @@ export class PlaylistManager {
    */
   async replayCurrent(seekSeconds = 0, isCurrent?: () => boolean): Promise<boolean> {
     if (isCurrent?.() === false) return false;
-    this.endExternalPlayback();
+    if (!isCurrent) this.endExternalPlayback();
     return this.playCurrent({ seekSeconds, skipAnnouncement: true, isCurrent });
   }
 
@@ -1394,6 +1429,8 @@ export class PlaylistManager {
    * 停止/空闲态下只更新字段与持久化，下次 playCurrent 自然带上新倍速，不强行起播。
    */
   async setPlaybackSpeed(speed: number): Promise<boolean> {
+    this.invalidateInteraction(); this.minaService.notifyControl?.(this.accountId, this.deviceId);
+    const generation = this.checkTimerGeneration;
     const clamped = Math.max(0.5, Math.min(2, speed));
     const wasPaused = this.state === 'paused';
     const wasStopped = this.state === 'stopped' || this.state === 'idle';
@@ -1408,6 +1445,7 @@ export class PlaylistManager {
       songloft.log.warn('[PlaylistManager] Failed to save playback speed: ' + String(e));
     }
 
+    if (generation !== this.checkTimerGeneration) return false;
     songloft.log.info(`[PlaylistManager] Playback speed set to ${clamped}`);
 
     // 停止/空闲态：不强行起播，等下次 play 带上新倍速。
@@ -1462,7 +1500,9 @@ export class PlaylistManager {
    * 加载歌单歌曲（通过宿主API桥接）
    * 首次返回空时延迟 500ms 重试一次（规避 SQLite WAL 长时间运行后的间歇性空返回）
    */
-  private async loadPlaylistSongs(playlistId: number): Promise<boolean> {
+  private async loadPlaylistSongs(playlistId: number, taskCurrent?: () => boolean): Promise<boolean> {
+    const generation = this.checkTimerGeneration, epoch = this.playbackEpoch;
+    const isCurrent = () => taskCurrent?.() !== false && generation === this.checkTimerGeneration && epoch === this.playbackEpoch && !this.externalPlayback;
     // 获取歌单排序偏好
     let sortBy = '';
     let sortOrder = '';
@@ -1485,6 +1525,7 @@ export class PlaylistManager {
           songloft.log.error('[PlaylistManager] Bridge returned invalid data for playlist: ' + playlistId);
           return false;
         }
+        if (isCurrent?.() === false) return false;
         this.songs = songs as any;
         this.totalSongs = songs.length;
         return songs.length > 0;
@@ -1494,22 +1535,27 @@ export class PlaylistManager {
       }
     };
 
+    if (isCurrent?.() === false) return false;
     const ok = await attempt(false);
     if (ok) {
       return true;
     }
 
+    if (isCurrent?.() === false) return false;
     songloft.log.warn(`[PlaylistManager] loadPlaylistSongs empty or failed, retrying in 500ms playlistId=${playlistId}`);
     await new Promise(r => setTimeout(r, 500));
+    if (isCurrent?.() === false) return false;
     const retryOk = await attempt(true);
     if (retryOk) {
       return true;
     }
 
+    if (isCurrent?.() === false) return false;
     // retry 后仍为空/失败：检测歌单是否真的不存在（扫描后 auto-create 歌单 ID 变化会导致旧 ID 失效）。
     // 区分「歌单不存在(ID 过期)」与「歌单存在但为空」，供上层决定是否刷新索引重试。
     try {
       const pl = await songloft.playlists.getById(playlistId);
+      if (!isCurrent()) return false;
       if (!pl) {
         this._lastLoadNotFound = true;
         songloft.log.warn(`[PlaylistManager] playlist ${playlistId} not found (stale ID), signaling caller to refresh index`);
@@ -1541,9 +1587,9 @@ export class PlaylistManager {
    * @param opts.speed 本次流的播放倍速。不传则沿用 this.playbackSpeed（保持上次设置）。
    *   服务端产出变速流，本机据此换算进度与自动切歌定时器。
    */
-  private async announceCurrentSong(song: { title: string; artist: string }): Promise<void> {
+  private async announceCurrentSong(song: { title: string; artist: string }, current: () => boolean): Promise<void> {
     const config = await this.configManager.getConfig();
-    if (!config.play_announcement_enabled) return;
+    if (!current() || !config.play_announcement_enabled) return;
     if (!song.title) return;
 
     const text = (config.play_announcement_template || '即将播放{artist}的{song}')
@@ -1553,7 +1599,7 @@ export class PlaylistManager {
     if (!text.trim()) return;
 
     songloft.log.info(`[PlaylistManager] Play announcement: "${text}" mode=${config.play_announcement_wait_mode}`);
-    await this.minaService.textToSpeech(this.accountId, this.deviceId, text);
+    await this.minaService.textToSpeech(this.accountId, this.deviceId, text, current);
 
     switch (config.play_announcement_wait_mode) {
       case 'fixed': {
@@ -1584,11 +1630,12 @@ export class PlaylistManager {
 
   private async playCurrent(opts?: { seekSeconds?: number; speed?: number; skipAnnouncement?: boolean; isCurrent?: () => boolean }): Promise<boolean> {
     if (this.externalPlayback || opts?.isCurrent?.() === false) return false;
+    if (!opts?.isCurrent) this.minaService.notifyControl?.(this.accountId, this.deviceId);
     const epoch = this.playbackEpoch;
     const generation = this.checkTimerGeneration;
     if (this.externalOperations.size) await Promise.allSettled(Array.from(this.externalOperations));
     if (this.externalPlayback || epoch !== this.playbackEpoch || opts?.isCurrent?.() === false ||
-      (opts?.isCurrent && generation !== this.checkTimerGeneration)) return false;
+      generation !== this.checkTimerGeneration) return false;
     return this.trackPlayback(() => this.playCurrentInternal(opts));
   }
 
@@ -1604,8 +1651,8 @@ export class PlaylistManager {
     this.streamStartedAtMs = 0;
     // 恢复任务的回调只负责任务身份；本地版本负责捕获同曲重播、暂停等操作。
     const generationAtPlay = this.checkTimerGeneration;
-    const isCurrent = () => !opts?.isCurrent ||
-      (opts.isCurrent() && generationAtPlay === this.checkTimerGeneration);
+    const isCurrent = () => !this.externalPlayback && epoch === this.playbackEpoch &&
+      opts?.isCurrent?.() !== false && generationAtPlay === this.checkTimerGeneration;
     // 当前歌曲要变了：作废上一首定好的「下一首」，末尾的 prefetchNextSong 会基于新的
     // currentIndex 重新定一次，预热的与真会播的始终是同一首。
     this.clearPendingNextIndex();
@@ -1618,7 +1665,7 @@ export class PlaylistManager {
     if (!opts?.skipAnnouncement) {
       const scope = (await this.configManager.getConfig()).play_announcement_scope || 'voice';
       if (scope === 'all' || this.announceOnSongChange) {
-        await this.announceCurrentSong(song);
+        await this.announceCurrentSong(song, isCurrent);
       }
     }
 
@@ -1660,7 +1707,7 @@ export class PlaylistManager {
     const ok = await this.forEachTarget('playURL', t => this.minaService.playURL(t.account_id, t.device_id, songURL, {
       title: song.title,
       artist: song.artist,
-    }));
+    }, isCurrent));
     if (this.externalPlayback || epoch !== this.playbackEpoch || !isCurrent()) return false;
     // 下发报失败不等于设备没播：3012「远程控制超时」是假失败，指令往往已经生效（#98）。
     // 回读设备核实，确认在播我们的流就按成功走，避免上层重试/跳歌/停摆。
@@ -1830,7 +1877,7 @@ export class PlaylistManager {
       songloft.log.error(`[PlaylistManager] Landing failure circuit breaker tripped (count=${this.landingFailureCount}), stopping playback`);
       this.landingFailureCount = 0;
       if (opts.tts) {
-        void this.minaService.textToSpeech(this.accountId, this.deviceId, LANDING_CIRCUIT_BREAK_TTS_TEXT).catch(() => {});
+        void this.minaService.textToSpeech(this.accountId, this.deviceId, LANDING_CIRCUIT_BREAK_TTS_TEXT).catch(() => { });
       }
       await this.stop();
       return;
@@ -1840,7 +1887,7 @@ export class PlaylistManager {
     const song = this.getCurrentSong();
     if (song?.type === 'radio' || this.playMode === 'singlePlay') {
       if (opts.tts) {
-        void this.minaService.textToSpeech(this.accountId, this.deviceId, LANDING_TERMINAL_FAILURE_TTS_TEXT).catch(() => {});
+        void this.minaService.textToSpeech(this.accountId, this.deviceId, LANDING_TERMINAL_FAILURE_TTS_TEXT).catch(() => { });
       }
       await this.stop();
       return;
@@ -1879,7 +1926,7 @@ export class PlaylistManager {
     for (let i = 0; i < PUSH_VERIFY_ATTEMPTS; i++) {
       await new Promise(r => setTimeout(r, PUSH_VERIFY_DELAY_MS));
       if (this.currentIndex !== indexAtPush || (this.getCurrentSong()?.id ?? 0) !== songIdAtPush ||
-          this.checkTimerGeneration !== generationAtPush) {
+        this.checkTimerGeneration !== generationAtPush) {
         return -1;
       }
       // 核实要等最多 ~6s（5 × 1.2s），期间用户可能按了停止/暂停。翻案会让 playCurrent 把
@@ -1892,8 +1939,8 @@ export class PlaylistManager {
       const state = await this.minaService.getPlayState(this.accountId, this.deviceId, { verify: true });
       // 回读本身也有异步窗口；过期的成功结果不能清掉新一轮起播的标记和失败计数。
       if (this.currentIndex !== indexAtPush || (this.getCurrentSong()?.id ?? 0) !== songIdAtPush ||
-          this.checkTimerGeneration !== generationAtPush ||
-          (this.state !== stateAtPush && (this.state === 'stopped' || this.state === 'paused'))) {
+        this.checkTimerGeneration !== generationAtPush ||
+        (this.state !== stateAtPush && (this.state === 'stopped' || this.state === 'paused'))) {
         return -1;
       }
       // status<0 = 查询也失败：`play-url` 和 `getPlayState` 走同一云端，抖动时会一起不通
@@ -3096,7 +3143,7 @@ export class PlaylistManager {
     this.landingFailureCount++;
     if (this.landingFailureCount >= LANDING_FAILURE_CIRCUIT_BREAK) {
       this.landingFailureCount = 0;
-      void this.minaService.textToSpeech(this.accountId, this.deviceId, LANDING_CIRCUIT_BREAK_TTS_TEXT).catch(() => {});
+      void this.minaService.textToSpeech(this.accountId, this.deviceId, LANDING_CIRCUIT_BREAK_TTS_TEXT).catch(() => { });
     }
     this.state = 'stopped';
     this.playStartTimeMs = 0;

@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import AppBar from './AppBar.vue';
 import DeviceSettings from './settings/DeviceSettings.vue';
 import PlaybackSettings from './settings/PlaybackSettings.vue';
+import AISettings from './settings/AISettings.vue';
 import VoiceSettings from './settings/VoiceSettings.vue';
 import ScheduleSettings from './settings/ScheduleSettings.vue';
 import ToolboxSettings from './settings/ToolboxSettings.vue';
@@ -17,10 +18,11 @@ const categories = [
   { id: 'device', title: '设备', subtitle: '服务器、账号和设备分组', icon: 'speaker_group', component: DeviceSettings },
   { id: 'playback', title: '播放', subtitle: '格式、音量和触屏显示', icon: 'music_note', component: PlaybackSettings },
   { id: 'voice', title: '语音', subtitle: '监听、口令和搜索', icon: 'record_voice_over', component: VoiceSettings },
+  { id: 'ai', title: 'AI 设置', subtitle: '模型连接、口令分析、对话与记忆', icon: 'auto_awesome', component: AISettings },
   { id: 'schedule', title: '定时', subtitle: '调度规则和执行日志', icon: 'schedule', component: ScheduleSettings },
   { id: 'toolbox', title: '工具箱', subtitle: 'URL、TTS 和操作结果', icon: 'construction', component: ToolboxSettings },
 ];
-const currentCategory = computed(() => categories.find((category) => category.id === (navigation.settingsCategory || 'device')) || categories[0]);
+const currentCategory = computed(() => categories.find((category) => category.id === (navigation.settingsCategory === 'chat' ? 'ai' : navigation.settingsCategory || 'device')) || categories[0]);
 const managedDeviceCount = computed(() => state.devices.reduce(
   (total, account) => total + account.devices.filter((device) => device.managed).length,
   0,
@@ -65,6 +67,7 @@ function resetSettingsViewport(): void {
   settingsBody.value?.scrollTo?.(0, 0);
   if (settingsBody.value) settingsBody.value.scrollTop = 0;
 }
+watch(() => navigation.settingsCategory, () => { resetSettingsViewport(); void nextTick(resetSettingsViewport); });
 function setCategory(id: string) {
   resetSettingsViewport();
   navigation.settingsCategory = id;

@@ -27,7 +27,10 @@ const { IndexingManager } = loadSource('../src/indexing/manager.ts', {
   }),
   '../data/traditional-to-simplified-map': loadSource('../src/data/traditional-to-simplified-map.ts'),
 });
-const { VoiceEngine } = loadSource('../src/voicecmd/engine.ts', {
+const { MusicCommandService: VoiceEngine } = loadSource('../src/music/service.ts', {
+  './guards': loadSource('../src/music/guards.ts'),
+  '../playback/voice_resume': loadSource('../src/playback/voice_resume.ts'),
+  '../playback/sleep_timer': loadSource('../src/playback/sleep_timer.ts', { '../sleep_timer': sleepTimer }),
   '../config/manager': {},
   '../account/manager': {},
   '../service/service': {},
@@ -35,14 +38,14 @@ const { VoiceEngine } = loadSource('../src/voicecmd/engine.ts', {
   '../indexing/manager': {},
   '../group/coordinator': {},
   '../player/url_builder': {},
-  './ai_analyzer': {},
-  './online_searcher': {},
+  '../voicecmd/ai_analyzer': {},
+  '../voicecmd/online_searcher': {},
   '../handlers/playlist': {},
   '../utils/http': {},
   '../utils/favorites': {},
   '../memory': {},
   '../sleep_timer': sleepTimer,
-  './defaults': defaults,
+  '../voicecmd/defaults': defaults,
 });
 
 globalThis.songloft = { log: { info() { }, warn() { }, error() { } } };
@@ -343,7 +346,7 @@ for (const name of ['继续听', '取消收藏歌曲', '不存在的歌单']) {
     if (name === '不存在的歌单') {
       assert.deepEqual(plays, []);
       assert.deepEqual(speech, [`未找到歌单：${name}`]);
-      assert.ok(warnings.includes(`[VoiceEngine] Playlist not found: ${name} (indexReady=true playlists=2 refreshing=false)`));
+      assert.ok(warnings.includes(`[MusicCommandService] Playlist not found: ${name} (indexReady=true playlists=2 refreshing=false)`));
     } else {
       assert.deepEqual(plays, [[name === '继续听' ? 7 : 8, 0, 'order']]);
       assert.deepEqual(speech, []);

@@ -50,7 +50,7 @@ const playlistHandler = fs.readFileSync(path.join(frontendRoot, '../src/handlers
 const scheduleHandler = fs.readFileSync(path.join(frontendRoot, '../src/handlers/schedule.ts'), 'utf8');
 const lyricHandler = fs.readFileSync(path.join(frontendRoot, '../src/handlers/lyric.ts'), 'utf8');
 const voiceCommandHandler = fs.readFileSync(path.join(frontendRoot, '../src/handlers/voice_command.ts'), 'utf8');
-const voiceEngine = fs.readFileSync(path.join(frontendRoot, '../src/voicecmd/engine.ts'), 'utf8');
+const voiceEngine = fs.readFileSync(path.join(frontendRoot, '../src/music/service.ts'), 'utf8');
 const playerManager = fs.readFileSync(path.join(frontendRoot, '../src/player/manager.ts'), 'utf8');
 const pluginTypes = fs.readFileSync(path.join(frontendRoot, '../src/types.ts'), 'utf8');
 const favorites = fs.readFileSync(path.join(frontendRoot, '../src/utils/favorites.ts'), 'utf8');
@@ -147,7 +147,7 @@ for (const role of ['on-surface', 'on-surface-variant', 'outline', 'outline-vari
     redesign,
     new RegExp(
       `\\.player-mode-popup,\\s*\\.player-volume-popup,\\s*\\.player-sleep-popup,\\s*\\.player-bar-more-popup \\{[^}]*`
-        + `--md-${role}: var\\(--player-popup-${role}\\)`,
+      + `--md-${role}: var\\(--player-popup-${role}\\)`,
     ),
     `弹层缺少 --md-${role} 还原`,
   );

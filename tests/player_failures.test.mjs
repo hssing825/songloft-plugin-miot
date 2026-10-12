@@ -40,16 +40,20 @@ const { registerPlaylistHandlers } = loadSource('../src/handlers/playlist.ts', {
 });
 const defaults = loadSource('../src/voicecmd/defaults.ts', {});
 const sleepTimer = loadSource('../src/sleep_timer/index.ts', {});
-const { VoiceEngine } = loadSource('../src/voicecmd/engine.ts', {
+const { MusicCommandService: VoiceEngine } = loadSource('../src/music/service.ts', {
+  '../group/coordinator': {},
+  './guards': loadSource('../src/music/guards.ts'),
+  '../playback/voice_resume': loadSource('../src/playback/voice_resume.ts'),
+  '../playback/sleep_timer': loadSource('../src/playback/sleep_timer.ts', { '../sleep_timer': sleepTimer }),
   '../player/manager': players,
-  './ai_analyzer': {},
-  './online_searcher': {},
+  '../voicecmd/ai_analyzer': {},
+  '../voicecmd/online_searcher': { OnlineSearcher: class { } },
   '../handlers/playlist': {},
   '../utils/http': http,
   '../utils/favorites': {},
   '../memory': {},
   '../sleep_timer': sleepTimer,
-  './defaults': defaults,
+  '../voicecmd/defaults': defaults,
 });
 
 function deferred() {
@@ -130,8 +134,8 @@ function player({ mode = 'loop', config = {}, service = {}, initialSongs = songs
     ...service,
   }, {
     getConfig: async () => config,
-    updateDevice: async () => {},
-    savePlaylistProgress: async () => {},
+    updateDevice: async () => { },
+    savePlaylistProgress: async () => { },
   });
   manager.initWithSongs(initialSongs, 0, mode, 1);
   manager.state = 'playing';
@@ -644,7 +648,7 @@ test('DLNA acquisition drains an already in-flight playlist push before handing 
     const oldPlay = manager.playAtIndex(0);
     await flush();
     let acquired = false;
-    const takeover = manager.beginExternalPlayback(() => {}).then(result => { acquired = result; });
+    const takeover = manager.beginExternalPlayback(() => { }).then(result => { acquired = result; });
     await flush();
     assert.equal(acquired, false);
     pending.resolve(true);
@@ -659,7 +663,7 @@ test('DLNA acquisition drains an already in-flight playlist push before handing 
 test('new playlist push waits for an in-flight DLNA operation before replacing its URL', async () => {
   await withClock(async () => {
     const { manager, pushes } = player();
-    await manager.beginExternalPlayback(() => {});
+    await manager.beginExternalPlayback(() => { });
     const pending = deferred();
     const external = manager.runExternalPlayback(() => pending.promise);
     const newPlay = manager.playAtIndex(1);
@@ -883,10 +887,12 @@ for (const change of ['same-song-restart', 'switch-song', 'pause', 'stop']) {
     await withClock(async h => {
       const slow = deferred();
       let queries = 0;
-      const { manager } = player({ service: {
-        playURL: async () => false,
-        getPlayState: () => { queries++; return slow.promise; },
-      } });
+      const { manager } = player({
+        service: {
+          playURL: async () => false,
+          getPlayState: () => { queries++; return slow.promise; },
+        }
+      });
       manager.markSongUnplayable(16, 'landing');
       manager.landingFailureCount = 2;
       const pending = manager.playCurrent();
@@ -995,7 +1001,7 @@ test('early external stop records an expiring failure, not a permanent blacklist
       service: { getPlayState: async () => ({ status: 0, position: 0, duration: 300, hasPosition: true, sampledAt: Date.now() }) },
     });
     manager.streamStartedAtMs = Date.now();
-    manager.handleLandingFailure = async () => {};
+    manager.handleLandingFailure = async () => { };
     await manager.checkExternalStop();
     await h.advance(20000);
     await manager.checkExternalStop();
@@ -1022,7 +1028,7 @@ for (const action of ['manual-clear', 'landing-success', 'natural-completion', '
         manager.currentIndex = 1;
         if (action === 'landing-success') await manager.verifyPlaybackLanded(1, 17, 0);
         if (action === 'natural-completion') {
-          manager.advanceToNext = async () => {};
+          manager.advanceToNext = async () => { };
           await manager.onSongFinished();
         }
         if (action === 'start-playback') await manager.playCurrent();
@@ -1097,7 +1103,7 @@ test('clear route visits each independent or shared manager once and returns the
     map.managers.set('account:speaker', first);
     map.managers.set('grp_test', group);
     const routes = new Map();
-    const router = { post: (path, handler) => routes.set(path, handler), get: () => {} };
+    const router = { post: (path, handler) => routes.set(path, handler), get: () => { } };
     registerPlaylistHandlers(router, map, {}, {});
     const clear = routes.get('/player/failures/clear');
     assert.deepEqual(await clear({}), { cleared: 3 });
@@ -1605,3 +1611,96 @@ for (const reloadStatus of [-1, 1]) {
     });
   });
 }
+
+test('guarded resume reaches the service without invalidating its own voice task', async () => {
+  await withClock(async () => {
+    let valid = true;
+    const { manager } = player({ service: { resumePlay: async (_a, _d, current) => { if (!current) valid = false; return current?.() ?? true; } } });
+    manager.state = 'paused';
+    assert.equal(await manager.resumePlayback({ isCurrent: () => valid }), true);
+    assert.equal(valid, true); manager.cleanup();
+  });
+});
+
+test('suspending chat prevents an unguarded in-flight URL build from pushing music', async () => {
+  await withClock(async () => {
+    const wait = deferred(), original = urls.URLBuilder.buildSongURL;
+    urls.URLBuilder.buildSongURL = () => wait.promise;
+    const { manager, pushes } = player();
+    try {
+      const pending = manager.replayCurrent(20); await flush();
+      manager.suspendForVoiceInteraction(); wait.resolve('http://speaker.test/old-song');
+      assert.equal(await pending, false); assert.equal(pushes.length, 0);
+    } finally { urls.URLBuilder.buildSongURL = original; manager.cleanup(); }
+  });
+});
+
+test('holding after TTS replays the original URL on manual resume', async () => {
+  await withClock(async () => {
+    let resumes = 0;
+    const { manager, pushes } = player({ service: { resumePlay: async () => { resumes++; return true; } } });
+    await manager.holdAfterInteraction(37);
+    assert.equal(await manager.resumePlayback(), true);
+    assert.equal(resumes, 0); assert.equal(pushes.length, 1);
+    assert.ok(pushes[0].includes('seek=37')); manager.cleanup();
+  });
+});
+
+test('chat reservation cancels a delayed playlist load even before music has started', async () => {
+  await withClock(async () => {
+    const wait = deferred();
+    songloft.playlists = { getById: async () => ({}), getSongs: () => wait.promise };
+    const { manager, pushes } = player();
+    const pending = manager.play(99); await flush();
+    manager.reserveForVoiceInteraction(); wait.resolve([{ ...songs[0], id: 999 }]);
+    assert.equal(await pending, false); assert.equal(pushes.length, 0);
+    assert.equal(manager.getCurrentSong().id, songs[0].id); manager.cleanup();
+  });
+});
+
+test('chat holds an originally paused song at its saved position', async () => {
+  await withClock(async () => {
+    const { manager } = player(); manager.state = 'paused'; manager.pausedPositionSec = 67;
+    assert.equal(manager.getInteractionPosition(), 67);
+    await manager.holdAfterInteraction(manager.getInteractionPosition());
+    assert.equal(manager.pausedPositionSec, 67); manager.cleanup();
+  });
+});
+
+test('dispatcher-style guarded music resume preserves both playback timer and task identity', async () => {
+  await withClock(async h => {
+    let current = true;
+    const { manager } = player({ service: { resumePlay: async (_a, _d, guard) => { if (!guard) current = false; return guard?.() ?? true; } } });
+    manager.state = 'paused'; manager.pausedPositionSec = 43;
+    const engine = resumeEngine(manager);
+    const handled = await engine.handleMessage({ account_id: 'account', device_id: 'speaker', message: { response: { answer: [{ question: '继续播放' }] } } }, { current: () => current, deferResume: true });
+    assert.equal(handled, true); assert.equal(current, true); assert.equal(manager.isPlaying(), true); assert.ok(h.timers.size > 0); manager.cleanup();
+  });
+});
+
+test('active chat detects volume controls without enabling the music engine', async () => {
+  await withClock(async () => {
+    const { manager } = player(), engine = resumeEngine(manager); engine.enabled = false;
+    assert.equal(await engine.fixedControlType('大声一点'), undefined);
+    assert.equal(await engine.fixedControlType('大声一点', true), 'set_volume');
+    assert.equal(engine.isEnabled(), false); manager.cleanup();
+  });
+});
+
+test('DLNA takeover invalidates pending voice analysis before it can replace the cast', async () => {
+  await withClock(async () => {
+    const chatTypes = loadSource('../src/chat/types.ts', {});
+    const { VoiceDispatcher } = loadSource('../src/voicecmd/dispatcher.ts', { '../chat/types': chatTypes });
+    const { PlaybackCoordinator } = loadSource('../src/playback/coordinator.ts', { '../chat/types': chatTypes });
+    const { manager } = player(), wait = deferred(), calls = [];
+    manager.minaService.setOnControl = callback => { manager.minaService.notifyControl = callback; };
+    const config = { getChatConfig: async () => chatTypes.DEFAULT_CHAT_CONFIG, findDeviceGroup: async () => null };
+    const playback = new PlaybackCoordinator({ get: () => manager }, manager.minaService, config);
+    const music = { cancelPendingResume() { }, hasFixedControl: async () => false, handleMessage: async (_message, options) => { await wait.promise; if (options.current()) calls.push('stale music'); return true; } };
+    const chat = { status: () => ({ phase: 'completed', followup_until: 0 }), interruptForRouting: async () => undefined };
+    const dispatcher = new VoiceDispatcher(config, music, chat, playback);
+    dispatcher.submit({ account_id: 'account', device_id: 'speaker', message: { request_id: 'old', response: { answer: [{ question: '播放歌曲' }] } } });
+    await flush(); await manager.beginExternalPlayback(() => { }); wait.resolve(); await flush();
+    assert.deepEqual(calls, []); assert.equal(manager.isExternalPlayback(), true); dispatcher.close(); manager.cleanup();
+  });
+});

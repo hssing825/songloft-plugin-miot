@@ -71,19 +71,21 @@ const AI_SYSTEM_PROMPT = `从指令中提取出操作和音乐信息，返回JSO
  * 调用 LLM API 分析用户语音指令，提取操作类型和参数
  */
 export class AIAnalyzer {
+  constructor(private schedule?: (run: () => Promise<AIAnalysisResult>, current: () => boolean, scope: string) => Promise<AIAnalysisResult>) { }
   /**
    * 调用 AI 分析用户语音指令（静默模式，失败返回 null）
    * @param query 用户语音文本
    * @param config AI 配置
    * @returns 分析结果，超时或失败返回 null
    */
-  async analyze(query: string, config: AIConfig): Promise<AIAnalysisResult | null> {
+  async analyze(query: string, config: AIConfig, current = () => true, scope = ''): Promise<AIAnalysisResult | null> {
     if (!config.enabled || !config.api_url || !config.api_key) {
       return null;
     }
 
     try {
-      return await this.callAI(query, config);
+      const run = () => this.callAI(query, config);
+      return this.schedule ? await this.schedule(run, current, scope) : await run();
     } catch (e) {
       songloft.log.warn(`[AIAnalyzer] AI analysis failed: ${String(e)}`);
       return null;

@@ -52,6 +52,17 @@ export class MinaService {
   /** 缓存设备ID → MIoT DID（MiIO RPC 使用） */
   private deviceMiotDIDCache: Map<string, string>;
   private interruptions = new Map<string, object>();
+  private onControl?: (account: string, device: string) => void;
+  setOnControl(callback: (account: string, device: string) => void): void { this.onControl = callback; }
+  notifyControl(account: string, device: string): void { this.onControl?.(account, device); }
+
+  async stopForInteraction(account: string, device: string, current: () => boolean): Promise<'stopped' | 'failed' | 'cancelled'> {
+    if (!current()) return 'cancelled';
+    this.interruptions.delete(this.playbackKey(account, device));
+    const client = this.getClient(account);
+    if (!client) return 'failed';
+    return client.playerStopGuarded(device, current);
+  }
 
   constructor(accountManager: AccountManager, configManager: ConfigManager) {
     this.accountManager = accountManager;
@@ -116,19 +127,22 @@ export class MinaService {
     return JSON.stringify([accountId, deviceId]);
   }
 
-  private cancelInterrupt(accountId: string, deviceId: string): void {
+  private cancelInterrupt(accountId: string, deviceId: string, current?: () => boolean): void {
+    if (!current) this.onControl?.(accountId, deviceId);
     this.interruptions.delete(this.playbackKey(accountId, deviceId));
   }
 
   /** 两轮停止覆盖回答转入媒体播放的情况；新操作取消尚未发送的指令（#118）。 */
-  async interruptAnswer(accountId: string, deviceId: string): Promise<InterruptResult> {
+  async interruptAnswer(accountId: string, deviceId: string, current?: () => boolean): Promise<InterruptResult> {
+    if (!current) this.onControl?.(accountId, deviceId);
+    if (current?.() === false) return { status: 'cancelled', stop_rounds: 0 };
     const key = this.playbackKey(accountId, deviceId);
     const ticket = {};
     this.interruptions.set(key, ticket);
     let stopRounds = 0;
     try {
       const client = this.getClient(accountId);
-      const isCurrent = () => this.interruptions.get(key) === ticket && this.getClient(accountId) === client;
+      const isCurrent = () => this.interruptions.get(key) === ticket && this.getClient(accountId) === client && current?.() !== false;
       if (!client) return { status: 'failed', stop_rounds: 0 };
       for (let round = 0; round < 2; round++) {
         if (round > 0) await new Promise(resolve => setTimeout(resolve, INTERRUPT_REPEAT_DELAY_MS));
@@ -150,8 +164,9 @@ export class MinaService {
    * 播放指定URL
    * 先暂停并停止旧播放（清理旧媒体上下文），再根据设备型号选择播放接口
    */
-  async playURL(accountId: string, deviceId: string, url: string, song?: string | PlayMetadata): Promise<boolean> {
-    this.cancelInterrupt(accountId, deviceId);
+  async playURL(accountId: string, deviceId: string, url: string, song?: string | PlayMetadata, current?: () => boolean): Promise<boolean> {
+    if (current?.() === false) return false;
+    this.cancelInterrupt(accountId, deviceId, current);
     const client = this.getClient(accountId);
     if (!client) {
       songloft.log.warn('[MinaService] playURL: no client for account: ' + accountId);
@@ -162,7 +177,8 @@ export class MinaService {
       // pause 可能被固件忽略，或只保留一个可被语音/自然结束恢复的旧媒体上下文。
       // 切歌本来就要替换旧流，复用 pause → stop 清掉它后再推新 URL（#481）。
       const startedAt = Date.now();
-      const stopped = await client.playerStop(deviceId);
+      const stopped = current ? (await client.playerStopGuarded(deviceId, current)) === 'stopped' : await client.playerStop(deviceId);
+      if (current?.() === false) return false;
       songloft.log.info(`[MinaService] Pre-stop before play device=${deviceId} accepted=${stopped} elapsedMs=${Date.now() - startedAt}`);
       if (!stopped) {
         songloft.log.warn('[MinaService] Pre-stop rejected, continuing with replacement URL');
@@ -182,7 +198,7 @@ export class MinaService {
       return await client.playByUrl(deviceId, url, hardware, disabledModels, keepLight, customAudioId,
         typeof song === 'string'
           ? { enabled: lyricsEnabled, songName: song || '' }
-          : { enabled: lyricsEnabled, metadata: song });
+          : { enabled: lyricsEnabled, metadata: song }, current);
     } catch (e) {
       songloft.log.error('[MinaService] playURL failed: ' + String(e));
       return false;
@@ -192,8 +208,9 @@ export class MinaService {
   /**
    * 停止播放
    */
-  async stopPlay(accountId: string, deviceId: string): Promise<boolean> {
-    this.cancelInterrupt(accountId, deviceId);
+  async stopPlay(accountId: string, deviceId: string, current?: () => boolean): Promise<boolean> {
+    if (current?.() === false) return false;
+    this.cancelInterrupt(accountId, deviceId, current);
     const client = this.getClient(accountId);
     if (!client) {
       songloft.log.warn('[MinaService] stopPlay: no client for account: ' + accountId);
@@ -201,7 +218,7 @@ export class MinaService {
     }
 
     try {
-      return await client.playerStop(deviceId);
+      return await client.playerStop(deviceId, current);
     } catch (e) {
       songloft.log.error('[MinaService] stopPlay failed: ' + String(e));
       return false;
@@ -211,8 +228,9 @@ export class MinaService {
   /**
    * 暂停播放
    */
-  async pausePlay(accountId: string, deviceId: string): Promise<boolean> {
-    this.cancelInterrupt(accountId, deviceId);
+  async pausePlay(accountId: string, deviceId: string, current?: () => boolean): Promise<boolean> {
+    if (current?.() === false) return false;
+    this.cancelInterrupt(accountId, deviceId, current);
     const client = this.getClient(accountId);
     if (!client) {
       songloft.log.warn('[MinaService] pausePlay: no client for account: ' + accountId);
@@ -220,7 +238,7 @@ export class MinaService {
     }
 
     try {
-      return await client.playerPause(deviceId);
+      return await client.playerPause(deviceId, current);
     } catch (e) {
       songloft.log.error('[MinaService] pausePlay failed: ' + String(e));
       return false;
@@ -231,8 +249,9 @@ export class MinaService {
    * 暂停播放并核验是否真的生效（详见 MinaClient.playerPauseVerified）。
    * 返回 'stopped' 表示该设备忽略了 pause、已升级为 stop，调用方需知晓无法原位续播。
    */
-  async pausePlayVerified(accountId: string, deviceId: string): Promise<'paused' | 'stopped' | 'failed'> {
-    this.cancelInterrupt(accountId, deviceId);
+  async pausePlayVerified(accountId: string, deviceId: string, current?: () => boolean): Promise<'paused' | 'stopped' | 'failed'> {
+    if (current?.() === false) return 'failed';
+    this.cancelInterrupt(accountId, deviceId, current);
     const client = this.getClient(accountId);
     if (!client) {
       songloft.log.warn('[MinaService] pausePlayVerified: no client for account: ' + accountId);
@@ -240,7 +259,7 @@ export class MinaService {
     }
 
     try {
-      return await client.playerPauseVerified(deviceId);
+      return await client.playerPauseVerified(deviceId, current);
     } catch (e) {
       songloft.log.error('[MinaService] pausePlayVerified failed: ' + String(e));
       return 'failed';
@@ -250,8 +269,9 @@ export class MinaService {
   /**
    * 恢复播放
    */
-  async resumePlay(accountId: string, deviceId: string): Promise<boolean> {
-    this.cancelInterrupt(accountId, deviceId);
+  async resumePlay(accountId: string, deviceId: string, current?: () => boolean): Promise<boolean> {
+    if (current?.() === false) return false;
+    this.cancelInterrupt(accountId, deviceId, current);
     const client = this.getClient(accountId);
     if (!client) {
       songloft.log.warn('[MinaService] resumePlay: no client for account: ' + accountId);
@@ -259,7 +279,7 @@ export class MinaService {
     }
 
     try {
-      return await client.playerResume(deviceId);
+      return await client.playerResume(deviceId, current);
     } catch (e) {
       songloft.log.error('[MinaService] resumePlay failed: ' + String(e));
       return false;
@@ -342,8 +362,9 @@ export class MinaService {
   /**
    * TTS语音播报
    */
-  async textToSpeech(accountId: string, deviceId: string, text: string): Promise<boolean> {
-    this.cancelInterrupt(accountId, deviceId);
+  async textToSpeech(accountId: string, deviceId: string, text: string, current?: () => boolean): Promise<boolean> {
+    if (current?.() === false) return false;
+    this.cancelInterrupt(accountId, deviceId, current);
     const client = this.getClient(accountId);
     if (!client) {
       songloft.log.warn(`[MinaService] textToSpeech: no client account=${accountId} device=${deviceId} text_length=${text.length}`);
@@ -358,7 +379,8 @@ export class MinaService {
       }
 
       songloft.log.info(`[MinaService] textToSpeech start account=${accountId} device=${deviceId} hardware=${identity.hardware || ''} miot_did=${identity.miotDID || ''} tts_command=${ttsCommand || ''} text_length=${text.length}`);
-      const ok = await client.textToSpeech(deviceId, text, identity);
+      if (current?.() === false) return false;
+      const ok = await client.textToSpeech(deviceId, text, { ...identity, isCurrent: current });
       songloft.log.info(`[MinaService] textToSpeech done account=${accountId} device=${deviceId} ok=${ok}`);
       return ok;
     } catch (e) {
@@ -464,7 +486,7 @@ export class MinaService {
           && Number.isFinite(parsed.play_song_detail.duration) && parsed.play_song_detail.duration > 0) {
           duration = parsed.play_song_detail.duration / 1000;
         }
-      } catch {}
+      } catch { }
     }
     return {
       status, position, duration, hasPosition,

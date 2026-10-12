@@ -76,7 +76,8 @@ function decodePayload<T>(value: unknown, status: number, ok: boolean): T {
     throw new ApiError(payload.error || '请求失败，请稍后重试', status);
   }
   if (!ok) {
-    const detail = (payload as { error?: string; message?: string } | null)?.error
+    const detail = (payload as { detail?: string } | null)?.detail
+      || (payload as { error?: string; message?: string } | null)?.error
       || (payload as { error?: string; message?: string } | null)?.message
       || `请求失败 (${status})`;
     throw new ApiError(detail, status);
@@ -132,9 +133,8 @@ export function pluginWebSocketUrl(path: string): string {
   const location = window.location;
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const token = pluginApi()?.getAuthToken?.() || '';
-  return `${protocol}//${location.host}${pluginBase()}${path}${
-    path.includes('?') ? '&' : '?'
-  }${token ? `access_token=${encodeURIComponent(token)}` : ''}`;
+  return `${protocol}//${location.host}${pluginBase()}${path}${path.includes('?') ? '&' : '?'
+    }${token ? `access_token=${encodeURIComponent(token)}` : ''}`;
 }
 
 export function messageOf(error: unknown): string {

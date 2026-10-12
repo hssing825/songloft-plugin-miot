@@ -103,6 +103,8 @@ export class ConversationMonitor {
   private startPromise: Promise<void> | null = null;
   /** 跨启停保留，旧请求结束前同一设备不能再发起请求。 */
   private inFlight = new Set<string>();
+  private webhookQueue: Array<() => Promise<void>> = [];
+  private webhookRunning = false;
 
   constructor(accountManager: AccountManager, configManager: ConfigManager) {
     this.accountManager = accountManager;
@@ -496,6 +498,7 @@ export class ConversationMonitor {
 
     dm.idleDelayMs = 0;
 
+    newMessages.sort((a, b) => a.message.timestamp_ms - b.message.timestamp_ms);
     // 更新最后时间戳
     dm.lastTimestampMs = maxTimestamp;
 
@@ -513,8 +516,21 @@ export class ConversationMonitor {
     await this.notifyCallbacks(newMessages, () => this.isCurrent(generation, dm));
 
     // 向所有 Webhook 推送
-    await this.triggerWebhooks(dm.accountId, dm.deviceId, dm.deviceName, newMessages, () => this.isCurrent(generation, dm));
+    if (this.webhookQueue.length < 32) {
+      this.webhookQueue.push(() => this.triggerWebhooks(dm.accountId, dm.deviceId, dm.deviceName, newMessages, () => this.isCurrent(generation, dm)));
+      void this.drainWebhooks();
+    } else songloft.log.warn('[ConversationMonitor] webhook queue full, delivery skipped');
     if (this.isCurrent(generation, dm)) dm.nextPollAt = Date.now() + this.pollInterval;
+  }
+
+  private async drainWebhooks(): Promise<void> {
+    if (this.webhookRunning) return;
+    this.webhookRunning = true;
+    try {
+      while (this.webhookQueue.length) {
+        try { await this.webhookQueue.shift()!(); } catch (error) { songloft.log.warn('[ConversationMonitor] webhook delivery failed: ' + String(error)); }
+      }
+    } finally { this.webhookRunning = false; }
   }
 
   /**

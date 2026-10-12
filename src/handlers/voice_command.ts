@@ -1,3 +1,4 @@
+import type { VoiceDispatcher } from '../voicecmd/dispatcher';
 // MIoT 智能音箱插件 - 语音口令 Handler
 // 翻译自 Go 源码: plugins/songloft-plugin-xiaomi/handlers/voice_command_handler.go
 
@@ -106,6 +107,7 @@ export function registerVoiceCommandHandlers(
   configManager: ConfigManager,
   accountManager: AccountManager,
   voiceEngine: VoiceEngine,
+  dispatcher?: VoiceDispatcher,
 ): void {
 
   // GET /voice-commands - 获取语音口令配置
@@ -290,7 +292,8 @@ export function registerVoiceCommandHandlers(
         },
       };
 
-      await voiceEngine.handleMessage(conversationMessage);
+      if (dispatcher) dispatcher.submit(conversationMessage);
+      else await voiceEngine.handleMessage(conversationMessage);
       return jsonResponse({
         success: true,
         data: {

@@ -16,7 +16,7 @@ function loadSource(path, dependencies) {
   }, exports);
   return exports;
 }
-const constants = loadSource('../src/mina/constants.ts', { '../data/tts-commands.json': {} });
+const constants = loadSource('../src/mina/constants.ts', { '../data/tts-commands.json': { default: {} } });
 const http = {};
 const { MinaHTTPClient } = loadSource('../src/mina/client.ts', {
   '../utils/cookie': { CookieJar: class { } }, '../utils/http': http,
@@ -162,7 +162,8 @@ for (const operation of ['playURL', 'resumePlay', 'pausePlay', 'pausePlayVerifie
       const preparation = deferred();
       if (operation === 'pausePlayVerified') h.client.playerPauseVerified = async () => 'paused';
       if (operation === 'playURL' || operation === 'textToSpeech') h.service.getDeviceIdentity = () => preparation.promise;
-      const newer = h.service[operation]('a', 'd', operation === 'playURL' ? 'http://example.test/song.mp3' : 'hello');
+      const args = operation === 'playURL' ? ['a', 'd', 'http://example.test/song.mp3'] : operation === 'textToSpeech' ? ['a', 'd', 'hello'] : ['a', 'd'];
+      const newer = h.service[operation](...args);
       await flush();
       const before = h.requests.length;
       await h.advance(2000);
@@ -350,4 +351,39 @@ test('handler validates IDs, exposes failures and cancellation, and never claims
   service.interruptAnswer = async () => { throw new Error('unexpected failure'); };
   assert.deepEqual(await invoke({ account_id: 'a', device_id: 'd' }), { success: false, error: 'unexpected failure' });
   assert.deepEqual(cacheWrites, []);
+});
+
+test('queued TTS rechecks interaction identity before dispatch', async () => {
+  await harness(async h => {
+    const slow = deferred();
+    h.setFetch(r => r.method === 'player_set_volume' ? slow.promise : response());
+    const volume = h.client.setVolume('d', 40); await flush();
+    let current = true;
+    const tts = h.client.textToSpeech('d', 'old answer', { isCurrent: () => current }); await flush();
+    current = false; slow.resolve(response()); await volume;
+    assert.equal(await tts, false);
+    assert.deepEqual(actions(h), ['player_set_volume']);
+  });
+});
+test('TTS identity cancelled during device preparation sends no answer', async () => {
+  await harness(async h => {
+    const preparation = deferred(); let current = true;
+    h.service.getDeviceIdentity = () => preparation.promise;
+    const tts = h.service.textToSpeech('a', 'd', 'old answer', () => current); await flush();
+    current = false; preparation.resolve({ hardware: '', miotDID: '' });
+    assert.equal(await tts, false); assert.equal(h.requests.length, 0);
+  });
+});
+
+test('queued resume rechecks cancellation before the device play request', async () => {
+  await harness(async h => {
+    const slow = deferred();
+    h.setFetch(r => r.method === 'player_set_volume' ? slow.promise : response());
+    const volume = h.client.setVolume('d', 40); await flush();
+    let current = true;
+    const resume = h.client.playerResume('d', () => current); await flush();
+    current = false; slow.resolve(response()); await volume;
+    assert.equal(await resume, false);
+    assert.deepEqual(actions(h), ['player_set_volume']);
+  });
 });
