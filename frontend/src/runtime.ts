@@ -1,4 +1,4 @@
-import { reactive } from 'vue';
+import { reactive, watch } from 'vue';
 import { resolveConfirm, state } from './store';
 
 export type AppPage = 'main' | 'settings' | 'player';
@@ -36,46 +36,98 @@ export function closePage(): void {
  * 每层都真正关闭并吞掉这次返回；没有浮层时返回 false 交由宿主处理。
  * 之前 dialogOpen/editorOpen 从未被置位，导致弹窗/编辑器打开时返回键会直接退出页面。
  */
-export function consumeBack(): boolean {
+function backAction(): (() => void) | undefined {
   if (state.confirm.open) {
-    resolveConfirm(false);
-    return true;
+    return () => resolveConfirm(false);
   }
   if (navigation.devicePickerOpen) {
-    navigation.devicePickerOpen = false;
-    return true;
+    return () => { navigation.devicePickerOpen = false; };
   }
   if (navigation.playerPopup) {
-    navigation.playerPopup = '';
-    return true;
+    return () => { navigation.playerPopup = ''; };
   }
   if (navigation.editorOpen) {
-    navigation.editorOpen = false;
-    return true;
+    return () => { navigation.editorOpen = false; };
   }
   if (navigation.page === 'settings' && navigation.settingsCategory && window.innerWidth < 600) {
-    navigation.settingsCategory = '';
-    return true;
+    return () => { navigation.settingsCategory = ''; };
   }
   if (navigation.page === 'player' && navigation.playerPage === 1 && window.innerWidth < 600) {
-    navigation.playerPage = 0;
-    return true;
+    return () => { navigation.playerPage = 0; };
   }
   if (navigation.page !== 'main') {
-    if (navigation.page === 'settings') navigation.settingsCategory = '';
-    closePage();
-    return true;
+    return () => {
+      if (navigation.page === 'settings') navigation.settingsCategory = '';
+      closePage();
+    };
   }
-  return false;
+  return undefined;
 }
 
-/** Flutter WebView 通过可取消事件咨询插件；preventDefault 表示已消费返回键。 */
+export function consumeBack(): boolean {
+  const action = backAction();
+  if (!action) return false;
+  action();
+  return true;
+}
+
+/** Flutter 直接派发事件；Lynx WebView / 跨域 iframe 使用带会话的状态与回执。 */
 export function installHostBack(): () => void {
+  let session = '';
+  let reply: ((message: unknown) => void) | undefined;
+  const publishState = (): void => {
+    reply?.({ type: 'songloft-back-state', session, canBack: !!backAction() });
+  };
   const onBack = (event: Event): void => {
     if (consumeBack()) event.preventDefault();
   };
+  const connect = (data: Record<string, unknown>, send: (message: unknown) => void): void => {
+    if (typeof data.session !== 'string' || !data.session || data.session.length > 128) return;
+    session = data.session;
+    reply = send;
+    publishState();
+  };
+  const request = (data: Record<string, unknown>): void => {
+    if (!reply || data.session !== session || !Number.isSafeInteger(data.id)) return;
+    const consumed = !document.dispatchEvent(new Event('songloft-back', { cancelable: true }));
+    reply({ type: 'songloft-back-result', session, id: data.id, consumed, canBack: !!backAction() });
+  };
+  const nativeConnect = (event: Event): void => {
+    const data = (event as CustomEvent).detail;
+    if (!data || typeof data !== 'object') return;
+    connect(data, (message) => window.postMessage(JSON.stringify(message), '*'));
+  };
+  const nativeRequest = (event: Event): void => {
+    const data = (event as CustomEvent).detail;
+    if (data && typeof data === 'object') request(data);
+  };
+  let parentOrigin = '';
+  const onMessage = (event: MessageEvent): void => {
+    if (window.parent === window || event.source !== window.parent) return;
+    const data = event.data;
+    if (!data || typeof data !== 'object') return;
+    if (data.type === 'songloft-back-connect') {
+      parentOrigin = event.origin;
+      connect(data, (message) => window.parent.postMessage(message, parentOrigin === 'null' ? '*' : parentOrigin));
+    } else if (data.type === 'songloft-back-request' && event.origin === parentOrigin) {
+      request(data);
+    }
+  };
   document.addEventListener('songloft-back', onBack);
-  return () => document.removeEventListener('songloft-back', onBack);
+  document.addEventListener('songloft-back-connect', nativeConnect);
+  document.addEventListener('songloft-back-request', nativeRequest);
+  window.addEventListener('message', onMessage);
+  window.addEventListener('resize', publishState);
+  const stop = watch(() => !!backAction(), publishState, { flush: 'sync' });
+  return () => {
+    stop();
+    reply = undefined;
+    document.removeEventListener('songloft-back', onBack);
+    document.removeEventListener('songloft-back-connect', nativeConnect);
+    document.removeEventListener('songloft-back-request', nativeRequest);
+    window.removeEventListener('message', onMessage);
+    window.removeEventListener('resize', publishState);
+  };
 }
 
 /**
