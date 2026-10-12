@@ -9,6 +9,7 @@ import type { ConversationMessage, DeviceConfig } from '../types';
 import { AIAnalyzer } from '../voicecmd/ai_analyzer';
 import { VoiceEngine } from '../voicecmd/engine';
 import { aiModelsUrl, maskUrl } from '../utils/ai_url';
+import { requestAI } from '../utils/ai_request';
 
 /** 解析请求体（兼容 Uint8Array 和 string） */
 function parseBody(req: HTTPRequest): any {
@@ -135,42 +136,31 @@ export function registerVoiceCommandHandlers(
       // 统一经 normalizeAiBaseUrl 归一：用户填 https://host 或 https://host/v1
       // 都得到「含 /v1 的 base」，避免拼出 .../v1/v1/models 这种重复前缀
       modelsUrl = aiModelsUrl(aiConfig.api_url);
-      songloft.log.info(`[VoiceCommands] Fetching models from ${maskUrl(modelsUrl)}`);
-
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('模型列表获取超时')), (aiConfig.timeout || 6) * 1000);
-      });
-
-      const fetchPromise = fetch(modelsUrl, {
+      const models = await requestAI(modelsUrl, {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${aiConfig.api_key}`,
           'Content-Type': 'application/json',
         },
+      }, aiConfig.timeout, { kind: 'models' }, async (resp, requestId) => {
+        // QuickJS 无 Response 类，duck-type 检查关键属性
+        if (!resp || typeof resp.ok !== 'boolean' || typeof resp.status !== 'number') {
+          throw new Error('无效的响应对象');
+        }
+
+        if (!resp.ok) {
+          const body = await resp.text().catch(() => '');
+          throw new Error(`模型列表请求失败 (${resp.status}): ${body.slice(0, 200)}`);
+        }
+
+        const data: { object: string; data?: Array<{ id: string; object?: string; owned_by?: string }> } = await resp.json();
+        if (!Array.isArray(data.data)) {
+          throw new Error('响应格式错误：缺少 data 数组');
+        }
+
+        songloft.log.info(`[VoiceCommands] id=${requestId} model_count=${data.data.length}`);
+        return data.data.map((m: ModelInfo) => ({ id: m.id, ownedBy: m.owned_by || '' }));
       });
-
-      const resp = await Promise.race([fetchPromise, timeoutPromise]);
-
-      // QuickJS 无 Response 类，duck-type 检查关键属性
-      if (!resp || typeof resp.ok !== 'boolean' || typeof resp.status !== 'number') {
-        throw new Error('无效的响应对象');
-      }
-
-      if (!resp.ok) {
-        const body = await resp.text().catch(() => '');
-        throw new Error(`模型列表请求失败 (${resp.status}): ${body.slice(0, 200)}`);
-      }
-
-      const data: { object: string; data?: Array<{ id: string; object?: string; owned_by?: string }> } = await resp.json();
-
-      if (!Array.isArray(data.data)) {
-        throw new Error('响应格式错误：缺少 data 数组');
-      }
-
-      const models = data.data.map((m: ModelInfo) => ({
-        id: m.id,
-        ownedBy: m.owned_by || '',
-      }));
 
       return jsonResponse({
         success: true,
