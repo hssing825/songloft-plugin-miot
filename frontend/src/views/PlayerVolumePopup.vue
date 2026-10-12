@@ -16,6 +16,7 @@ function clampVolume(value: number): number {
 
 const localVolume = ref(clampVolume(props.modelValue));
 const previousVolume = ref(50);
+const dragging = ref(false);
 const open = computed(() => navigation.playerPopup === props.popupId);
 const icon = computed(() => {
   if (localVolume.value <= 0) return 'volume_off';
@@ -24,7 +25,9 @@ const icon = computed(() => {
   return 'volume_up';
 });
 
-watch(() => props.modelValue, (value) => { localVolume.value = clampVolume(value); });
+watch(() => props.modelValue, (value) => {
+  if (!dragging.value) localVolume.value = clampVolume(value);
+});
 
 /** 用 JS 计算弹层 fixed 坐标。胶囊档的 shell 用 `overflow: hidden` 把整宽顶边进度按
  *  pill 轮廓裁掉，absolute 弹层会被那层裁到只剩贴着胶囊顶边的几像素 —— 表现就是
@@ -108,6 +111,11 @@ function update(value: number): void {
   localVolume.value = clampVolume(value);
 }
 
+function setDragging(active: boolean): void {
+  dragging.value = active;
+  if (!active) localVolume.value = clampVolume(props.modelValue);
+}
+
 function commit(value: number): void {
   update(value);
   emit('change', localVolume.value);
@@ -136,10 +144,12 @@ function toggleMute(): void {
             :model-value="localVolume"
             :min="0"
             :max="100"
+            :disabled="disabled"
             orientation="vertical"
             aria-label="设备音量"
             @update:model-value="update"
             @change="commit"
+            @dragging="setDragging"
           />
         </div>
         <SlButton variant="icon" :icon="icon" player-icon class="player-tool-button" :title="localVolume > 0 ? '静音' : '取消静音'" @click="toggleMute" />

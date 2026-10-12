@@ -22,7 +22,7 @@ const favoriteBusy = ref(false);
 const sleepTimerBusy = ref(false);
 const sleepTimer = ref<SleepTimerStatus>({ active: false, mode: 'time', remaining: 0, total: 0 });
 const mobilePager = ref<HTMLElement | null>(null);
-const mobilePage = ref(0);
+const mobilePage = computed(() => navigation.playerPage);
 const desktopLyrics = ref<HTMLElement | null>(null);
 const mobileLyrics = ref<HTMLElement | null>(null);
 let touchStartX = 0;
@@ -245,7 +245,7 @@ function syncMobilePage(): void {
     const currentPager = mobilePager.value;
     if (!currentPager || currentPager.clientWidth <= 0) return;
     mobileSettledPage = page;
-    mobilePage.value = page;
+    navigation.playerPage = page;
     const target = currentPager.clientWidth * page;
     if (Math.abs(currentPager.scrollLeft - target) > 1) currentPager.scrollLeft = target;
   }, 120);
@@ -254,7 +254,7 @@ function syncMobilePage(): void {
 function showMobilePage(index: number): void {
   const pager = mobilePager.value;
   mobileSettledPage = index;
-  mobilePage.value = index;
+  navigation.playerPage = index;
   if (!pager) return;
   window.clearTimeout(mobileScrollTimer);
   pager.scrollLeft = pager.clientWidth * index;
@@ -308,6 +308,7 @@ watch(() => state.player.current_song?.id, loadSongDetails);
 watch([() => state.player.current_song?.id, cover, coverMobile], refreshBackgroundPalette, { immediate: true });
 watch(() => [state.currentAccountId, state.currentDeviceId], loadSleepTimer);
 watch(activeLyric, centerActiveLyric);
+watch(() => navigation.playerPage, showMobilePage);
 </script>
 
 <template>

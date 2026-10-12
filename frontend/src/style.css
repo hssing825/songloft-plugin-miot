@@ -160,6 +160,13 @@ h1, h2, h3, p { margin: 0; }
 .switch input:checked ~ .switch-track::after { background: var(--md-on-primary); transform: translateX(20px); }
 .sl-slider { width: 100%; accent-color: var(--md-primary); }
 .sl-slider-wrap { width: 100%; display: flex; align-items: stretch; justify-content: center; }
+.sl-slider-vertical { position: relative; width: 44px; height: 112px; touch-action: none; user-select: none; }
+.sl-slider-vertical-track { position: absolute; top: 6px; bottom: 6px; left: calc(50% - 2px); width: 4px; border-radius: 2px; background: var(--md-surface-container-highest); }
+.sl-slider-vertical-fill { position: absolute; right: 0; bottom: 0; left: 0; border-radius: inherit; background: var(--md-primary); }
+.sl-slider-vertical-thumb { position: absolute; left: calc(50% - 6px); width: 12px; height: 12px; border-radius: 50%; background: var(--md-primary); pointer-events: none; }
+.sl-slider-vertical-input, .sl-slider-vertical-input:disabled { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; pointer-events: none; }
+.sl-slider-vertical:focus-within { outline: 2px solid var(--md-primary); outline-offset: 2px; border-radius: 8px; }
+.sl-slider-vertical-disabled { opacity: .55; }
 .sl-list-view { display: block; width: 100%; height: var(--miot-list-height); }
 /* 列表容器不画上边框：桌面由 .song-list-header 自己的底边线承担分隔；移动端表头
    隐藏，容器上再画一条横贯整宽的线会让第一行（常是“正在播放”）上方凭空多出一根
@@ -286,6 +293,7 @@ h1, h2, h3, p { margin: 0; }
 .player-bar-tools > .player-popup-anchor, .player-bar-tools > .sl-button-icon { width: 36px; height: 36px; }
 
 .player-control-active { color: var(--md-primary); }
+.player-favorite-button { color: var(--md-on-surface); }
 .player-favorite-button.player-control-active { color: #f44336; }
 .player-favorite-button.player-control-active .sl-icon { font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24; }
 .player-control-button { color: var(--md-on-surface); }
@@ -315,7 +323,7 @@ h1, h2, h3, p { margin: 0; }
 .player-volume-popup { width: 64px; height: 200px; display: flex; flex-direction: column; align-items: center; padding: 12px 8px 8px; }
 .player-volume-value { color: var(--md-on-surface-variant); font-size: 12px; font-weight: 500; }
 .player-volume-slider-shell { width: 44px; min-height: 104px; flex: 1; display: flex; align-items: center; justify-content: center; overflow: visible; }
-.player-volume-slider { width: 112px; flex: 0 0 112px; transform: rotate(-90deg); }
+.player-volume-slider { width: 44px; height: 112px; flex: 0 0 44px; }
 .player-sleep-popup { position: fixed; z-index: 232; width: 280px; max-width: calc(100vw - 32px); max-height: calc(100vh - 96px); overflow-y: auto; background: var(--md-surface); border: 1px solid var(--md-outline-variant); border-radius: 12px; box-shadow: var(--md-shadow-3); }
 /* PlayerBar 工具区：弹层位置由 JS 通过 el.closest('.player-bar-tools') 自动检测并右对齐。 */
 .sleep-timer-status { min-height: 48px; display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 16px; color: var(--md-primary); font-size: 14px; font-weight: 500; }
@@ -356,7 +364,7 @@ h1, h2, h3, p { margin: 0; }
 .player-seek-active { height: 100%; background: var(--md-primary); }
 .player-seek-thumb { position: absolute; top: calc(50% - 6px); width: 12px; height: 12px; border-radius: 50%; background: var(--md-primary); pointer-events: none; }
 .player-seek-input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
-.player-seek-input:disabled { cursor: default; }
+.player-seek-input:disabled { cursor: default; opacity: 0; }
 
 .page-view { height: 100vh; min-height: 100vh; background: var(--md-surface); overflow: hidden; }
 /* 顶部栏向下偏移安全区，内容也要预留同样的高度，避免遮住二级页面首行。 */

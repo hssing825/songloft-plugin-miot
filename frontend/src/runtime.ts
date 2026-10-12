@@ -6,6 +6,7 @@ export type AppPage = 'main' | 'settings' | 'player';
 export const navigation = reactive({
   page: 'main' as AppPage,
   pageHistory: [] as AppPage[],
+  playerPage: 0,
   settingsCategory: '',
   playerPopup: '',
   editorOpen: false,
@@ -17,6 +18,7 @@ export function openPage(page: AppPage): void {
   if (navigation.page === page) return;
   navigation.pageHistory.push(navigation.page);
   navigation.page = page;
+  if (page === 'player') navigation.playerPage = 0;
   navigation.playerPopup = '';
   document.documentElement.scrollTop = 0;
   document.body.scrollTop = 0;
@@ -55,12 +57,25 @@ export function consumeBack(): boolean {
     navigation.settingsCategory = '';
     return true;
   }
+  if (navigation.page === 'player' && navigation.playerPage === 1 && window.innerWidth < 600) {
+    navigation.playerPage = 0;
+    return true;
+  }
   if (navigation.page !== 'main') {
     if (navigation.page === 'settings') navigation.settingsCategory = '';
     closePage();
     return true;
   }
   return false;
+}
+
+/** Flutter WebView 通过可取消事件咨询插件；preventDefault 表示已消费返回键。 */
+export function installHostBack(): () => void {
+  const onBack = (event: Event): void => {
+    if (consumeBack()) event.preventDefault();
+  };
+  document.addEventListener('songloft-back', onBack);
+  return () => document.removeEventListener('songloft-back', onBack);
 }
 
 /**

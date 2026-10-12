@@ -5,11 +5,13 @@ import SettingsPage from './views/SettingsPage.vue';
 import FullscreenPlayer from './views/FullscreenPlayer.vue';
 import Snackbar from './views/Snackbar.vue';
 import ConfirmDialog from './views/ConfirmDialog.vue';
-import { detectHostMode, navigation } from './runtime';
+import { detectHostMode, installHostBack, navigation } from './runtime';
 import { disposeStore, initialize, state } from './store';
 
+let disposeHostBack: (() => void) | undefined;
 onMounted(() => {
   detectHostMode();
+  disposeHostBack = installHostBack();
   void initialize();
 });
 
@@ -20,7 +22,10 @@ watch(
   },
 );
 
-onUnmounted(disposeStore);
+onUnmounted(() => {
+  disposeHostBack?.();
+  disposeStore();
+});
 </script>
 
 <template>
