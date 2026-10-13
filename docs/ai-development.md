@@ -6,6 +6,12 @@
 
 公共机制见 [父仓库 AI 流程](https://github.com/songloft-org/songloft/blob/main/docs/ai-development.md)。本文件与英文版同步；本仓库的业务、设备和验证要求优先。
 
+## 关联 Issue 回复
+
+修复推送后主动展示完整回复草稿、完整目标 `owner/repo#编号` 与待确认的评论动作，包括关联父仓库 Issue。没有适用评论授权时等待用户确认，已有授权直接回复，不重复询问；确认仅对应已展示的具体动作，提交/推送/发布授权不自动包含评论或关闭。其他已授权工作继续。发表前复核最新评论，发表后回读正文并交付链接；完整规则见 [父仓库关联 Issue 回复](https://github.com/songloft-org/songloft/blob/main/docs/ai-development.md#关联-issue-回复)。
+
+插件回复分清修复提交已推送、具体发布版本已包含修复和真机已验收；草稿随 CI、发布结果更新，说明测试、Not run、剩余问题及用户下一步。未试听时保留验收边界，不等用户追问才准备回复，也不擅自关闭 Issue。
+
 ## 验证与证据
 
 源码改动执行 `npx tsc --noEmit`、`node --experimental-strip-types --test tests/*.test.mjs`、`npm run build`、`npm run validate`。前端另跑 `npm run typecheck && npm run build && npm test`；宿主接口变更需父仓库相应 Go 回归。设备行为按 AGENTS 的回归矩阵，覆盖有/无进度、Music API/直链、语音/整点、seek/倍速及自然下一首；断言实际 URL、进度来源、失败标记、TTS 和定时器，不能只数回调或看 UI。纯文档无需机械构建。

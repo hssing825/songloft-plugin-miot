@@ -6,6 +6,12 @@ Investigate, implement, validate, self-review, and deliver continuously after ta
 
 Shared mechanics are in the [parent AI workflow](https://github.com/songloft-org/songloft/blob/main/docs/en/ai-development.md). Synchronize the Chinese version; local business, device, and validation requirements take precedence.
 
+## Linked Issue Replies
+
+After pushing a fix, proactively show the complete reply draft, full target `owner/repo#number`, and comment action awaiting approval, including parent Issues. Wait for confirmation when no applicable comment authorization exists; otherwise post directly without asking again. Confirmation applies only to the specific action shown; commit/push/release approval does not automatically include comments or closure. Continue other authorized work. Review current comments before posting, read the posted body back, and deliver its link. See the complete [parent rules for linked Issue replies](https://github.com/songloft-org/songloft/blob/main/docs/en/ai-development.md#linked-issue-replies).
+
+Plugin replies distinguish pushed fixes, specific published versions containing them, and device acceptance. Update drafts as CI/release results change and state tests, Not run checks, remaining concerns, and user next steps. Retain acceptance limits when listening was not tested; prepare replies without waiting for the user to ask, and do not close Issues on your own.
+
 ## Validation and Evidence
 
 For source changes run `npx tsc --noEmit`, `node --experimental-strip-types --test tests/*.test.mjs`, `npm run build`, and `npm run validate`. Frontend changes also run its `npm run typecheck && npm run build && npm test`; host changes need corresponding parent Go regressions. Follow AGENTS' device matrix: with/without progress, Music API/direct URL, voice/hourly, seek/speed, and natural next track. Assert actual URLs, progress sources, failure markers, TTS, and timers rather than callback counts or UI alone. Documentation-only edits need no mechanical rebuild.
