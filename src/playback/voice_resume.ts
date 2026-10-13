@@ -1,5 +1,6 @@
 import type { ConfigManager } from '../config/manager';
 import type { MinaService } from '../service/service';
+import { isDeviceIdle, isDeviceStatusKnown } from './device_state';
 
 interface SmartResumeTask {
   accountId: string;
@@ -69,6 +70,7 @@ export class VoiceResumeCoordinator {
     let lastStatus = -1;
     let progressStalled = false;
     let deviceReportsProgress = false;
+    let playingWithoutPosition = false;
 
     while (Date.now() - task.startedAt < maxWaitMs) {
       if (!isCurrent()) return;
@@ -87,14 +89,16 @@ export class VoiceResumeCoordinator {
         lastPosition = -1;
         lastStatus = -1;
         progressStalled = false;
+        playingWithoutPosition = false;
       } else if (sampleAt >= task.startedAt && sampleAt > lastSampleAt) {
         lastSampleAt = sampleAt;
         lastStatus = st.status;
+        playingWithoutPosition = st.status === 1 && st.hasPosition === false;
         if (st.hasPosition && Number.isFinite(st.position) && st.position >= 0) deviceReportsProgress = true;
         const stream = pm.matchDeviceStream({ ...st, status: 1 });
         const positionRegressed = st.hasPosition && pm.hasDevicePositionRegressed(st.position, resumePosition);
         // 某些固件在实际播放时连续误报 paused/stopped；进度推进时只校准，不再发 play（#449）。
-        if ((st.status === 0 || st.status === 1 || st.status === 2) && stream !== 'foreign' && st.hasPosition) {
+        if (isDeviceStatusKnown(st.status) && stream !== 'foreign' && st.hasPosition) {
           if (lastPosition >= 0 && st.position - lastPosition + 1e-6 >= 0.1) {
             if (stream === 'ours' && (pm.isDeviceAtRestartPosition(st.position, resumePosition) ||
               pm.isDeviceAtRestartPosition(lastPosition, resumePosition))) {
@@ -116,7 +120,8 @@ export class VoiceResumeCoordinator {
           lastPosition = -1;
           progressStalled = false;
         }
-        if (st.status === 0 || st.status === 2) {
+        // L15A 直链模式在媒体被语音打断后返回 status=3，不能当作仍在播放或查询失败。
+        if (isDeviceIdle(st.status)) {
           idleHits++;
           progressStalled = false;
           if (st.hasPosition && stream === 'ours') {
@@ -142,6 +147,9 @@ export class VoiceResumeCoordinator {
           lastStatus = -1;
           progressStalled = false;
         }
+      } else {
+        // 旧的成功状态不能授权超时后重推；无进度兜底必须有本轮新的状态证据。
+        playingWithoutPosition = false;
       }
       const remainingMs = maxWaitMs - (Date.now() - task.startedAt);
       if (remainingMs <= 0) break;
@@ -151,12 +159,18 @@ export class VoiceResumeCoordinator {
     }
 
     if (!isCurrent()) return;
-    if (!deviceBecameIdle && !deviceRestarted && (lastStatus < 0 || (!deviceTakenOver && !progressStalled))) {
-      // 未知状态/缺失进度不能证明已续播，也不能据此重推。恢复本地驱动，不发送设备指令。
+    if (!deviceBecameIdle && !deviceRestarted &&
+      (lastStatus < 0 || (!deviceTakenOver && !progressStalled && !playingWithoutPosition))) {
+      // 查询失败、旧采样不能证明播报结束，保留原来的计时兜底。成功返回状态但不支持位置的设备，
+      // 等配置的播报窗口后重推保存位置；不能只恢复计时器并让音箱无声到下一首（#481）。
       songloft.log.warn('[VoiceEngine] Smart resume timed out without playback evidence; restoring timer only');
       // 保存锚点可能只有本地外推位置，不能把它当作设备真实上报的进度（#124）。
       pm.resetAutoNextTimer(resumePosition, deviceReportsProgress);
       return;
+    }
+
+    if (playingWithoutPosition && !deviceBecameIdle) {
+      songloft.log.warn('[VoiceEngine] Speech timeout with status-only playback; replaying saved position');
     }
 
     if (deviceBecameIdle && !deviceTakenOver) {

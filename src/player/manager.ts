@@ -7,6 +7,7 @@
 import { ConfigManager, playlistProgressScope } from '../config/manager';
 import { MinaService } from '../service/service';
 import { URLBuilder, playbackOptionsOf, playbackOptionsFromConfig } from './url_builder';
+import { isDeviceIdle, isDeviceStatusKnown } from '../playback/device_state';
 import { getHostBaseUrl, callHostAPI } from '../utils/http';
 import { isDebugLog } from '../utils/debug';
 import type { PlayState, PlayMode, PlayerStatus, DeviceTargetRef, DeviceGroup } from '../types';
@@ -139,7 +140,7 @@ const TAIL_PROBE_INTERVAL_MS = 1000;
 /** 与 Mina 的 HTTP 超时对齐，避免正常的秒级云端响应尚未返回就切歌。 */
 const DEADLINE_QUERY_WAIT_MS = 5000;
 const DEADLINE_RETRY_MS = 5000;
-/** 查询失败、冻结或流长不匹配不能立即证明结束，也不能无限阻塞队列。 */
+/** 连续有效进度刷新宽限；证据中断后最多重试这段时间，避免无限阻塞队列。 */
 const DEADLINE_GRACE_MS = 30000;
 /** 设备进度保留毫秒：流内推进 100ms 即视为在播放，容忍少量上报抖动。 */
 const TAIL_STALL_ADVANCE_MIN_SEC = 0.1;
@@ -151,6 +152,15 @@ const TAIL_STALL_NEAR_END_SEC = 2;
 const TAIL_STOP_CONFIRM_COUNT = 2;
 
 type DevicePlayState = Awaited<ReturnType<MinaService['getPlayState']>>;
+
+interface DeadlineTailEvidence {
+  position: number;
+  duration: number;
+  sampledAt: number;
+  confirmed: boolean;
+  interrupted: boolean;
+  stopHits: number;
+}
 
 /** 仅在服务器本地时间整点后 90 秒内识别；不按时钟无条件推歌。 */
 const HOURLY_RESUME_WINDOW_MS = 90000;
@@ -363,6 +373,7 @@ export class PlaylistManager {
   private deadlineSamplePosition: number = -1;
   private deadlineSampleAtMs: number = -1;
   private deadlineGraceDeadlineMs: number = 0;
+  private deadlineTailEvidence: DeadlineTailEvidence | null = null;
   private devicePositionObserved: boolean = false; // 当前流曾收到有效进度，软续播保留、重新推流清空
   private landingVerifyTimer: any = null; // 定时器ID（起播确认探测，见 LANDING_VERIFY_* 常量）
   private landingFailureCount: number = 0; // 连续起播失败次数（#466 熔断），任何一次确认成功即清零
@@ -1235,7 +1246,7 @@ export class PlaylistManager {
       this.recordDevicePosition(state);
       const stream = this.matchDeviceStream({ ...state, status: 1 });
       // #449：status 可能连续误报 paused/stopped；当前流的进度推进比状态码更可靠。
-      if ((state.status === 0 || state.status === 1 || state.status === 2) && state.hasPosition && stream !== 'foreign') {
+      if (isDeviceStatusKnown(state.status) && state.hasPosition && stream !== 'foreign') {
         if (lastPosition >= 0 && state.position - lastPosition + 1e-6 >= 0.1) {
           if (stream === 'ours' && (this.isDeviceAtRestartPosition(state.position, resumeFromSec) ||
             this.isDeviceAtRestartPosition(lastPosition, resumeFromSec))) {
@@ -1261,10 +1272,11 @@ export class PlaylistManager {
           repushReason = '';
         }
         lastPosition = state.position;
-      } else if (state.status === 0 || state.status === 2) {
+      } else if (isDeviceIdle(state.status)) {
         lastPosition = state.hasPosition && stream !== 'foreign' ? state.position : -1;
         idleHits++;
         repushReason = idleHits >= 2 ? `device not playing (status=${state.status})` : '';
+        if (idleHits >= 2) break;
       } else {
         return;
       }
@@ -1521,6 +1533,7 @@ export class PlaylistManager {
    */
   initWithSongs(songs: Song[], startIndex: number, playMode: PlayMode, playlistId: number): void {
     this.devicePositionObserved = false;
+    this.deadlineTailEvidence = null;
     this.songs = songs;
     this.totalSongs = songs.length;
     this.currentIndex = (startIndex >= 0 && startIndex < songs.length) ? startIndex : 0;
@@ -1536,6 +1549,7 @@ export class PlaylistManager {
    */
   initWithTempArtist(songs: Song[], artistName: string, playMode: PlayMode): void {
     this.devicePositionObserved = false;
+    this.deadlineTailEvidence = null;
     this.songs = songs;
     this.totalSongs = songs.length;
     this.currentIndex = 0;
@@ -2361,6 +2375,86 @@ export class PlaylistManager {
       : song.duration;
   }
 
+  /** 流长失准时，尾部连续进度只证明还在播放，不能用元数据截止时间证明结束。 */
+  private observeDeadlineTail(st: DevicePlayState, sampleAt: number, fresh: boolean): { advancing: boolean; ended: boolean } {
+    const result = { advancing: false, ended: false };
+    const song = this.getCurrentSong();
+    if (!song || this.isVoiceSuspended()) {
+      this.deadlineTailEvidence = null;
+      return result;
+    }
+    if (!fresh) return result;
+    const previous = this.deadlineTailEvidence;
+    if (!st.hasPosition || !Number.isFinite(st.position) || st.position < 0 ||
+      !Number.isFinite(st.duration) || st.duration <= 0 ||
+      !isDeviceStatusKnown(st.status)) {
+      // 短暂缺失后可重新采样确认原流；缺失本身不刷新宽限，也不证明回零/结束。
+      if (previous?.confirmed) {
+        previous.interrupted = true;
+        previous.stopHits = 0;
+      } else {
+        this.deadlineTailEvidence = null;
+      }
+      return result;
+    }
+    const position = st.position * this.playbackSpeed + this.streamSeekOffsetSec;
+    if (!previous) {
+      // 初始证据只在元数据尾部附近建立；曲中外来媒体不靠持续推进接管此分支。
+      if (st.status === 1 && position >= song.duration - TAIL_PROBE_WINDOW_SEC &&
+        position <= song.duration + TAIL_PROBE_WINDOW_SEC) {
+        this.deadlineTailEvidence = {
+          position: st.position, duration: st.duration, sampledAt: sampleAt,
+          confirmed: false, interrupted: false, stopHits: 0,
+        };
+      }
+      return result;
+    }
+    const elapsed = (sampleAt - previous.sampledAt) / 1000;
+    const advance = st.position - previous.position;
+    const stableDuration = Math.abs(st.duration - previous.duration) <= Math.max(1, previous.duration * 0.01);
+    if (!stableDuration || elapsed <= 0 || elapsed > DEADLINE_GRACE_MS / 1000) {
+      this.deadlineTailEvidence = null;
+      return result;
+    }
+    if (previous.interrupted) {
+      // 恢复的第一份采样可暂时冻结；保留已确认的流，重新建立基线，等下一份推进再刷新宽限。
+      // 回拨或明显跳跃仍使旧流失效，不能把中断后的零位置当作自然结束。
+      if (advance >= -1e-6 && advance <= elapsed + 1) {
+        previous.position = st.position;
+        previous.sampledAt = sampleAt;
+        previous.interrupted = false;
+        previous.stopHits = 0;
+      } else {
+        this.deadlineTailEvidence = null;
+      }
+      return result;
+    }
+    // 已确认尾部的同一流回零是自然结束；中断后的回零仍不能确认，避免旧采样误切。
+    if (previous.confirmed && previous.position >= LOOP_DETECT_MIN_ADVANCE_SEC &&
+      st.position < LOOP_DETECT_RESET_THRESHOLD_SEC) {
+      return { advancing: false, ended: true };
+    }
+    if (advance + 1e-6 >= TAIL_STALL_ADVANCE_MIN_SEC && advance <= elapsed + 1 &&
+      (st.status === 1 || previous.confirmed)) {
+      previous.position = st.position;
+      previous.sampledAt = sampleAt;
+      previous.confirmed = true;
+      previous.stopHits = 0;
+      return { advancing: true, ended: false };
+    }
+    if (previous.confirmed && Math.abs(advance) < TAIL_STALL_ADVANCE_MIN_SEC) {
+      previous.position = st.position;
+      previous.sampledAt = sampleAt;
+      previous.stopHits = st.status === 1 ? 0 : previous.stopHits + 1;
+      // 流长失准时，playing 下的冻结可能是缓冲，交给 30 秒宽限而非 6 秒停滞判据。
+      return { advancing: false, ended: position >= song.duration - TAIL_STALL_NEAR_END_SEC &&
+        previous.stopHits >= TAIL_STOP_CONFIRM_COUNT };
+    }
+    // 位置跳跃、回拨或未确认前的停止打断连续性，不能延长旧流宽限。
+    this.deadlineTailEvidence = null;
+    return result;
+  }
+
   /** 定时器到点不等于设备播完：核对实际位置，不确定时有限重试（#495）。 */
   private async verifyTimerDeadline(): Promise<void> {
     if (this.state !== 'playing') return;
@@ -2399,26 +2493,29 @@ export class PlaylistManager {
         const fresh = sampleAt > this.deadlineSampleAtMs;
         // 成功响应但整轮从未上报进度的设备，等待也拿不到结束证据；保留原时长兜底。
         // 查询失败、旧采样、外来媒体及曾有进度后暂时缺失，仍走有界重试（#495）。
-        useMetadataFallback = fresh && (st.status === 0 || st.status === 1 || st.status === 2) &&
+        useMetadataFallback = fresh && isDeviceStatusKnown(st.status) &&
           st.hasPosition === false && !this.devicePositionObserved && streamMatch !== 'foreign';
-        const sampleElapsed = (sampleAt - this.deadlineSampleAtMs) / 1000;
-        const sampleAdvance = st.position - this.deadlineSamplePosition;
-        // 流长只能辅助识别媒体。曲末附近连续新采样持续推进且没有明显跳跃时，
-        // 允许设备时长失准；曲中接管、位置跳跃、冻结与重复缓存均不能走此分支。
-        const continuousTail = validPosition && fresh && st.status === 1 && !this.isVoiceSuspended() &&
-          this.deadlineSamplePosition >= 0 && sampleAdvance >= TAIL_STALL_ADVANCE_MIN_SEC &&
-          sampleAdvance <= sampleElapsed + 1 &&
-          this.deadlineSamplePosition * this.playbackSpeed + this.streamSeekOffsetSec >= song.duration - TAIL_PROBE_WINDOW_SEC &&
-          devicePosition <= song.duration + TAIL_PROBE_WINDOW_SEC;
-        const usableStream = streamMatch !== 'foreign' || continuousTail;
+        const uncertainDuration = streamMatch === 'foreign' ||
+          (streamMatch === 'unknown' && this.deadlineTailEvidence !== null);
+        if (!uncertainDuration) this.deadlineTailEvidence = null;
+        const tail = uncertainDuration
+          ? this.observeDeadlineTail(st, sampleAt, fresh)
+          : { advancing: false, ended: false };
         if (fresh) {
           this.deadlineSamplePosition = validPosition && st.status === 1 ? st.position : -1;
           this.deadlineSampleAtMs = sampleAt;
         }
-        deviceEnded = fresh && validPosition && st.status >= 0 && usableStream &&
-          (looped || devicePosition >= duration);
+        deviceEnded = tail.ended || (fresh && validPosition && st.status >= 0 && !uncertainDuration &&
+          (looped || devicePosition >= duration));
+        if (tail.advancing) {
+          // 持续推进可以超过元数据与最初的宽限截止时间；只从最后一份有效证据计宽限。
+          this.deadlineGraceDeadlineMs = Math.min(sampleAt, Date.now()) + DEADLINE_GRACE_MS;
+          this.scheduleDeadlineCheck(DEADLINE_RETRY_MS);
+          songloft.log.info(`[PlaylistManager] Timer deferred: devicePosition=${devicePosition.toFixed(1)}s remaining=${remaining.toFixed(1)}s speed=${this.playbackSpeed} streamDuration=${st.duration}s continuousTail=true`);
+          return;
+        }
         if (fresh && validPosition && stillPlaying && !looped && progressedSinceDeadline &&
-          usableStream && devicePosition < duration && remaining > 0) {
+          !uncertainDuration && devicePosition < duration && remaining > 0) {
           this.playStartTimeMs = Date.now() - devicePosition / this.playbackSpeed * 1000;
           const samplePosition = this.deadlineSamplePosition;
           const sampleTime = this.deadlineSampleAtMs;
@@ -2431,10 +2528,16 @@ export class PlaylistManager {
           songloft.log.info(`[PlaylistManager] Timer deferred: devicePosition=${devicePosition.toFixed(1)}s remaining=${remaining.toFixed(1)}s speed=${this.playbackSpeed}`);
           return;
         }
-        reason = `status=${st.status} streamPosition=${st.position}s streamDuration=${st.duration}s streamMatch=${streamMatch} hasPosition=${st.hasPosition} remaining=${remaining.toFixed(1)}s looped=${looped} progressed=${progressedSinceDeadline} fresh=${fresh} continuousTail=${continuousTail}`;
+        reason = `status=${st.status} streamPosition=${st.position}s streamDuration=${st.duration}s streamMatch=${streamMatch} hasPosition=${st.hasPosition} remaining=${remaining.toFixed(1)}s looped=${looped} progressed=${progressedSinceDeadline} fresh=${fresh} continuousTail=${tail.advancing} tailConfirmed=${this.deadlineTailEvidence?.confirmed ?? false} tailInterrupted=${this.deadlineTailEvidence?.interrupted ?? false} tailEnded=${tail.ended}`;
       } catch (e) {
         if (this.state !== 'playing' || this.currentIndex !== indexAtCheck || this.checkTimerGeneration !== generationAtCheck) return;
         this.deadlineSamplePosition = -1;
+        if (this.deadlineTailEvidence?.confirmed) {
+          this.deadlineTailEvidence.interrupted = true;
+          this.deadlineTailEvidence.stopHits = 0;
+        } else {
+          this.deadlineTailEvidence = null;
+        }
         reason = 'device query failed: ' + String(e);
       }
     } else if (this.transitionOffset < 0) {
@@ -2597,6 +2700,7 @@ export class PlaylistManager {
       if (st.sampledAt !== undefined && st.sampledAt <= this.tailProbeLastSampleAt) {
         // 缓存只供展示，重复读取不累加 stopped 命中或停滞时间，也不重锚主定时器。
       } else if (st.status >= 0 && Number.isFinite(devicePos) && devicePos >= 0 && st.hasPosition &&
+        !(this.deadlineTailEvidence?.confirmed && (!Number.isFinite(st.duration) || st.duration <= 0)) &&
         this.matchDeviceStream({ ...st, status: 1 }) !== 'foreign') {
         if (st.sampledAt !== undefined) this.tailProbeLastSampleAt = st.sampledAt;
         if (st.position > this.tailProbeMaxPosition) this.tailProbeMaxPosition = st.position;
@@ -2738,7 +2842,7 @@ export class PlaylistManager {
           this.stopPollMisses = 0;
           this.stopPollLastPosition = -1;
           this.stopPollResumePosition = null;
-        } else if (status === 0 || status === 2 || (status === 1 && stream === 'foreign')) {
+        } else if (isDeviceIdle(status) || (status === 1 && stream === 'foreign')) {
           const advanced = hasPosition && stream !== 'foreign' && this.stopPollLastPosition >= 0 &&
             position - this.stopPollLastPosition >= EXTERNAL_STOP_POSITION_ADVANCE_MIN_SEC;
           this.stopPollLastPosition = hasPosition && stream !== 'foreign' ? position : -1;
@@ -2907,7 +3011,7 @@ export class PlaylistManager {
           }
           lastPosition = st.position;
         } else lastPosition = -1;
-        idleHits = st.status === 0 || st.status === 2 ? idleHits + 1 : 0;
+        idleHits = isDeviceIdle(st.status) ? idleHits + 1 : 0;
         if (idleHits >= 2) {
           // 只有新鲜的连续 idle 才发恢复指令，播报中、重复缓存或未知状态都不重推。
           const latestConfig = await this.configManager.getConfig();
@@ -2983,6 +3087,7 @@ export class PlaylistManager {
     this.deadlineSamplePosition = -1;
     this.deadlineSampleAtMs = -1;
     this.deadlineGraceDeadlineMs = 0;
+    this.deadlineTailEvidence = null;
     if (this.landingVerifyTimer !== null) {
       clearTimeout(this.landingVerifyTimer);
       this.landingVerifyTimer = null;

@@ -86,6 +86,38 @@ The Node 22 type-stripping flag is required for tests that import TS directly. B
   durations. Fixing #124 must not remove songloft-org/songloft#495's five-second query wait or thirty-second confirmation grace.
   The fallback zero with `hasPosition=false` is not an actual reset; a valid zero with `hasPosition=true`
   also does not mean progress is unsupported. Unknown duration must not invent a completion timer.
+- **Advancing playback is not completion evidence (parent #495 recurrence)**: the 2026-10-12 log shows a
+  631-second track resumed at `seek=112` switching at stream position 525.009 seconds (song position 637.009).
+  Subsequent episodes started at `seek=0` also switched early, so seek alone does not explain the issue.
+  With mismatched durations, fresh tail samples with stable stream duration and plausible progress increments
+  may only postpone checks; they must not establish completion against shorter metadata.
+  Once confirmed, continuous progress may exceed the fifteen-second metadata tail window and refresh the
+  thirty-second grace period. Fall back within the grace period from the last valid progress after evidence is interrupted.
+  Confirm resets and repeated stopped reports separately. Frozen playing positions may be buffering and must
+  not trigger the six-second stall rule against the metadata tail. Missing stream duration must not let the
+  tail probe bypass this protection. Reestablish consecutive samples after recovering from short query failures.
+  If the first recovered sample is stationary, retain the confirmed stream and rebuild only the baseline; refresh
+  grace after subsequent progress instead of dropping evidence and cutting playback at the old deadline.
+  Pause, voice suspension, URL repush, new tracks, and timer rescheduling clear tail continuity, separately
+  from the retained flag that valid progress was observed. Verify actual audio duration versus reported stream
+  duration on hardware; do not treat a reported 3090 seconds as the real playback length.
+- **Recovery owns playback control during suspension (parent #481)**: HTTP/WS status fusion only updates
+  display while voice playback is suspended or hourly recovery is waiting; it must not call `resetAutoNextTimer`.
+  Keep displayed progress at the saved anchor instead of extrapolating cached playback until recovery completes.
+  Even one measured position cannot establish recovery. Rescheduling increments the revision and cancels the
+  pending recovery task, leaving the timer moving without audio until the next track. The recovery coordinator
+  rebuilds the timer after confirming consecutive progress. L15A reports `status=3` after interruption in direct
+  URL mode; neither treat it as playing nor confuse it with query failure `-1`. Handle it throughout voice and
+  hourly detection, recovery waiting, and resume verification. Share status predicates through
+  `src/playback/device_state.ts` rather than updating only one of these paths. A successful cloud resume needs readback; repeated
+  idle without progress must repush the same track at the saved position, preserving seek/speed/offset.
+  Successful status-only queries replay after the configured speech window. Query failures or stale samples retain
+  the conservative fallback and must not be described as restored audio. Saved anchors and UI estimates are not
+  device progress. Repeated cached reads must not retain an earlier status-only success flag to authorize a timeout
+  repush; require a new status sample in the current round.
+  Acceptance must cover with/without status pages, Music API/direct URLs, voice/hourly recovery,
+  seek/speed, and the next natural transition. Assert the same track one millisecond before completion and the
+  actual next URL afterward, without failure markers or TTS that interrupts the next track.
 - **Carry the progress source through every caller**: the second argument to
   `resetAutoNextTimer(position, deviceReportsProgress)` distinguishes device measurements from saved anchors
   and clock estimates. Check smart-resume timeouts, HTTP/WS status fusion during suspension, plugin reload,
@@ -105,7 +137,8 @@ The Node 22 type-stripping flag is required for tests that import TS directly. B
 
 | Historical issues | Behavior to preserve | Regression entry points |
 |---|---|---|
-| Parent #495 ↔ plugin #124 | Switch status-only devices on time; retain confirmation for missing measured progress, buffering, frozen positions, and mismatched durations | `player_transition`, `player_failures` |
+| Parent #495 ↔ plugin #124 | Switch status-only devices on time; mismatched-duration progress may exceed metadata and thirty seconds without being cut, with bounded confirmation after evidence is interrupted | `player_transition`, `player_failures` |
+| Parent #481/#171 | Status polling must not cancel voice recovery; direct-URL status=3 interruptions actually resume or repush, with accurate subsequent natural transitions after hourly and voice recovery | `player_failures`, `player_status` |
 | Parent #404, plugin #60/#87/#88/#95 | Resume after long pauses with remaining time, seek/speed/offset intact; counter resets must not overwrite the interruption anchor | `player_failures`, `player_status` |
 | Parent #264/#437 | Keep probing unknown durations without inventing an end limit; discovering device duration restores the regular timer | `player_transition`, backend seek tests |
 | Plugin #98 | A cloud acknowledgment timeout does not prove failed playback; retain false-failure verification, retry backoff, and external recovery | `player_failures`, `mina_status` |

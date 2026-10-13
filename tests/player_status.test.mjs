@@ -112,6 +112,22 @@ test('cached samples only extrapolate display position and never reset the timer
   });
 });
 
+for (const recovery of ['voice', 'hourly']) {
+  test(`${recovery} recovery displays the saved anchor instead of extrapolating cached playback`, async () => {
+    await withStatus(async h => {
+      h.manager.isVoiceSuspended = () => recovery === 'voice';
+      h.manager.isHourlyResumePending = () => recovery === 'hourly';
+      assert.equal((await h.refresh()).position, 20);
+      h.advance(3000);
+      assert.equal((await h.resolve()).position, 20);
+      assert.deepEqual(h.resets, []);
+      h.manager.isVoiceSuspended = () => false;
+      h.manager.isHourlyResumePending = () => false;
+      assert.equal((await h.resolve()).position, 8, 'normal playback still extrapolates fresh device progress');
+    });
+  });
+}
+
 test('fresh and cached status preserve fractional progress after seek and speed conversion', async () => {
   await withStatus(async h => {
     h.manager.getPlaybackSpeed = () => 0.5;

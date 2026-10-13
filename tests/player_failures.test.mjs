@@ -24,7 +24,9 @@ const http = {
   callHostAPI: async () => ({}),
 };
 const urls = loadSource('../src/player/url_builder.ts', { '../utils/http': http });
+const deviceState = loadSource('../src/playback/device_state.ts', {});
 const players = loadSource('../src/player/manager.ts', {
+  '../playback/device_state': deviceState,
   '../config/manager': { playlistProgressScope: () => 'account:speaker' },
   './url_builder': urls,
   '../utils/http': http,
@@ -43,7 +45,7 @@ const sleepTimer = loadSource('../src/sleep_timer/index.ts', {});
 const { MusicCommandService: VoiceEngine } = loadSource('../src/music/service.ts', {
   '../group/coordinator': {},
   './guards': loadSource('../src/music/guards.ts'),
-  '../playback/voice_resume': loadSource('../src/playback/voice_resume.ts'),
+  '../playback/voice_resume': loadSource('../src/playback/voice_resume.ts', { './device_state': deviceState }),
   '../playback/sleep_timer': loadSource('../src/playback/sleep_timer.ts', { '../sleep_timer': sleepTimer }),
   '../player/manager': players,
   '../voicecmd/ai_analyzer': {},
@@ -140,6 +142,108 @@ function player({ mode = 'loop', config = {}, service = {}, initialSongs = songs
   manager.initWithSongs(initialSongs, 0, mode, 1);
   manager.state = 'playing';
   return { manager, pushes, tts };
+}
+
+// Log samples from songloft-org/songloft#495, including the stream resumed at seek=112.
+for (const [duration, seek, position, streamDuration] of [
+  [631, 112, 518.995, 3090.081],
+  [519, 0, 519.178, 577.345],
+  [736, 0, 736.275, 803.559],
+  [611, 0, 611.725, 743.936],
+]) {
+  for (const ending of ['loop', 'stopped', 'stalled']) {
+    test(`issue 495: ${duration}s episode seek=${seek} waits for ${ending} after sixty seconds of tail progress`, async () => {
+      await withClock(async h => {
+        const startedAt = Date.now();
+        const { manager, pushes, tts } = player({
+          mode: 'order',
+          initialSongs: songs.map(song => ({ ...song, duration })),
+          service: {
+            getPlayState: async () => {
+              if (manager.currentIndex !== 0) return { status: 1, position: 0, duration, hasPosition: true, sampledAt: Date.now() };
+              const elapsed = (Date.now() - startedAt) / 1000;
+              return {
+                status: ending === 'stopped' && elapsed >= 60 ? 0 : 1,
+                position: ending === 'loop' && elapsed >= 60 ? 0 : position + Math.min(60, elapsed),
+                duration: streamDuration, hasPosition: true, sampledAt: Date.now(),
+              };
+            },
+          },
+        });
+        assert.equal(await manager.playCurrent({ seekSeconds: seek }), true);
+        assert.equal(manager.getStreamSeekOffsetSec(), seek);
+        assert.equal(pushes.length, 1);
+        assert.equal(pushes[0].includes('seek='), seek > 0);
+        if (seek > 0) assert.ok(pushes[0].includes(`seek=${seek}`));
+        manager.startCheckTimer(0.1);
+        await h.advance(60099);
+        assert.equal(pushes.length, 1, 'continuous measured playback must not be cut at metadata or thirty seconds');
+        assert.equal(manager.currentIndex, 0);
+        assert.equal(manager.state, 'playing');
+        if (ending === 'stalled') {
+          await h.advance(20000);
+          assert.equal(pushes.length, 1, 'a frozen playing report can be buffering and retains the grace period');
+        }
+        await h.advance(ending === 'loop' ? 1 : 10001);
+        assert.equal(pushes.length, 2);
+        assert.ok(pushes[1].includes('/songs/17/play'));
+        assert.equal(manager.currentIndex, 1);
+        assert.equal(manager.state, 'playing');
+        assert.equal(manager.unplayableSongs.size, 0);
+        assert.deepEqual(tts, []);
+        assert.ok(manager.checkTimer !== null);
+        assert.equal(manager.getStreamSeekOffsetSec(), 0);
+        manager.cleanup();
+        assert.equal(h.timers.size, 0);
+      });
+    });
+  }
+}
+
+for (const operation of ['pause', 'voice suspension', 'same-song restart', 'next', 'new playlist', 'new artist playlist', 'external takeover', 'cleanup']) {
+  test(`issue 495: ${operation} clears confirmed tail evidence and ignores an old deadline response`, async () => {
+    await withClock(async h => {
+      const startedAt = Date.now();
+      let slow;
+      const { manager, pushes } = player({
+        service: {
+          pausePlayVerified: async () => 'paused',
+          getPlayState: async () => slow ? slow.promise : {
+            status: 1, position: 300 + (Date.now() - startedAt) / 1000,
+            duration: 500, hasPosition: true, sampledAt: Date.now(),
+          },
+        },
+      });
+      await manager.playCurrent();
+      manager.startCheckTimer(0.1);
+      await h.advance(5100);
+      assert.equal(manager.deadlineTailEvidence.confirmed, true);
+      slow = deferred();
+      const timersBeforeQuery = new Set(h.timers.keys());
+      const pending = manager.verifyTimerDeadline();
+      await flush();
+      const queryTimers = new Set([...h.timers.keys()].filter(id => !timersBeforeQuery.has(id)));
+      if (operation === 'pause') await manager.pause();
+      else if (operation === 'voice suspension') manager.suspendForVoiceInteraction();
+      else if (operation === 'same-song restart') await manager.replayCurrent();
+      else if (operation === 'next') await manager.next();
+      else if (operation === 'new playlist') manager.initWithSongs(songs, 0, 'order', 2);
+      else if (operation === 'new artist playlist') manager.initWithTempArtist(songs, 'artist');
+      else if (operation === 'external takeover') await manager.beginExternalPlayback(() => { });
+      else manager.cleanup();
+      assert.equal(manager.deadlineTailEvidence, null);
+      const timers = [...h.timers.keys()];
+      const pushCount = pushes.length;
+      slow.resolve({ status: 1, position: 0, duration: 500, hasPosition: true, sampledAt: Date.now() });
+      await pending;
+      await flush();
+      assert.equal(manager.deadlineTailEvidence, null);
+      assert.equal(pushes.length, pushCount);
+      assert.deepEqual([...h.timers.keys()], timers.filter(id => !queryTimers.has(id)));
+      manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
 }
 
 for (const firstReportsProgress of [false, true]) {
@@ -287,7 +391,7 @@ async function continuePlaying(engine) {
   });
 }
 
-function voiceSession({ readState, timeout = 30, resumeResult = true, duration = 300, position = 60, seekOffset = 0, speed = 1 } = {}) {
+function voiceSession({ readState, timeout = 30, resumeResult = true, duration = 300, position = 60, seekOffset = 0, speed = 1, unmatched = false } = {}) {
   const queries = [];
   const resumes = [];
   const { manager, pushes } = player({
@@ -308,12 +412,68 @@ function voiceSession({ readState, timeout = 30, resumeResult = true, duration =
   manager.playStartTimeMs = Date.now() - position / speed * 1000;
   const engine = resumeEngine(manager);
   engine.configManager.getConfig = async () => ({ smart_resume_timeout: timeout, voice_memory_enabled: false });
-  manager.suspendForVoiceInteraction();
-  engine.scheduleSmartResume(manager, 'account', 'speaker');
+  if (unmatched) engine.resumeUnmatched('account', 'speaker');
+  else {
+    manager.suspendForVoiceInteraction();
+    engine.scheduleSmartResume(manager, 'account', 'speaker');
+  }
   return { manager, engine, pushes, queries, resumes };
 }
 
-test('issues 124 and 516: status-only smart resume does not turn the saved anchor into measured progress', async () => {
+for (const [position, seekOffset, speed] of [[60, 0, 1], [160, 100, 0.5], [120, 60, 2]]) {
+  for (const snapshot of [
+    { status: 1, volume: 40 },
+    { status: 3, volume: 40 },
+    { status: 1, play_song_detail: { position: 60000, duration: 300000 } },
+  ]) {
+    test(`issue 481: status fusion cannot cancel unmatched voice recovery seek=${seekOffset} speed=${speed} ${JSON.stringify(snapshot)}`, async () => {
+      await withClock(async h => {
+        let landedAt = 0;
+        const s = voiceSession({ position, seekOffset, speed, unmatched: true, readState: () => landedAt ? {
+          status: 1, position: (Date.now() - landedAt) / 1000,
+          duration: (300 - s.manager.getStreamSeekOffsetSec()) / speed, hasPosition: true, sampledAt: Date.now(),
+        } : { status: 3, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() } });
+        const push = s.manager.minaService.playURL;
+        s.manager.minaService.playURL = async (...args) => { landedAt = Date.now(); return push(...args); };
+        const info = snapshot.play_song_detail ? { ...snapshot, play_song_detail: {
+          position: (position - seekOffset) / speed * 1000, duration: (300 - seekOffset) / speed * 1000,
+        } } : snapshot;
+        s.manager.minaService.getPlayerStatus = async () => ({ sampledAt: Date.now(), data: { info: JSON.stringify(info) } });
+        updateDeviceStatusCache('account', 'speaker', { timestamp: 0 });
+        const revision = s.manager.getPlaybackRevision();
+        await resolvePlayerStatus({ getOrCreate: async () => s.manager }, s.manager.minaService, 'account', 'speaker');
+        await flush();
+        assert.equal(s.manager.getPlaybackRevision(), revision);
+        assert.equal(s.manager.isVoiceSuspended(), true);
+        assert.equal(s.manager.getPosition(), position);
+        await h.advance(4000);
+        assert.equal(s.pushes.length, 1, 'a lost media context requires a real seek URL');
+        assert.ok(s.pushes[0].includes(`seek=${position}`));
+        if (speed !== 1) assert.ok(s.pushes[0].includes(`speed=${speed}`));
+        const endAt = landedAt + (300 - position) / speed * 1000;
+        await h.advance(endAt - Date.now() - 1);
+        assert.equal(s.pushes.length, 1);
+        assert.equal(s.manager.currentIndex, 0);
+        await h.advance(1);
+        assert.equal(s.pushes.length, 2);
+        assert.ok(s.pushes[1].includes('/songs/17/play'));
+        assert.equal(s.manager.currentIndex, 1);
+        assert.equal(s.manager.state, 'playing');
+        assert.equal(s.manager.unplayableSongs.size, 0);
+        await h.advance(300000 / speed - 1);
+        assert.equal(s.pushes.length, 2);
+        await h.advance(1);
+        assert.equal(s.pushes.length, 3);
+        assert.ok(s.pushes[2].includes('/songs/18/play'));
+        s.engine.setEnabled(false);
+        s.manager.cleanup();
+        assert.equal(h.timers.size, 0);
+      });
+    });
+  }
+}
+
+test('issues 481, 124 and 516: status-only smart resume actually restores audio without inventing measured progress', async () => {
   await withClock(async h => {
     const s = voiceSession({
       timeout: 5, position: 290,
@@ -323,11 +483,14 @@ test('issues 124 and 516: status-only smart resume does not turn the saved ancho
     assert.equal(s.manager.isVoiceSuspended(), false);
     assert.equal(s.manager.getPosition(), 290);
     assert.equal(s.resumes.length, 0);
+    assert.equal(s.pushes.length, 1);
+    assert.ok(s.pushes[0].includes('seek=290'));
+    assert.equal(s.manager.devicePositionObserved, false);
     await h.advance(9999);
-    assert.equal(s.pushes.length, 0);
+    assert.equal(s.pushes.length, 1);
     await h.advance(1);
     assert.equal(s.manager.getCurrentSong().id, 17);
-    assert.equal(s.pushes.length, 1);
+    assert.equal(s.pushes.length, 2);
     s.manager.cleanup();
     assert.equal(h.timers.size, 0);
   });
@@ -345,14 +508,26 @@ test('issues 124 and 171: a status-only HTTP snapshot during suspension keeps me
     manager.playStartTimeMs = Date.now();
     manager.startCheckTimer(20);
     manager.suspendForVoiceInteraction();
+    const engine = resumeEngine(manager);
+    engine.configManager.getConfig = async () => ({ smart_resume_timeout: 5 });
+    engine.scheduleSmartResume(manager, 'account', 'speaker');
     updateDeviceStatusCache('account', 'speaker', { timestamp: 0 });
     await resolvePlayerStatus({ getOrCreate: async () => manager }, manager.minaService, 'account', 'speaker');
     await flush();
-    await h.advance(19999);
+    assert.equal(manager.isVoiceSuspended(), true);
+    assert.equal(manager.devicePositionObserved, false);
+    await h.advance(4999);
     assert.equal(pushes.length, 0);
     await h.advance(1);
-    assert.equal(manager.getCurrentSong().id, 17);
     assert.equal(pushes.length, 1);
+    assert.equal(manager.getCurrentSong().id, 16);
+    assert.equal(manager.devicePositionObserved, false);
+    await h.advance(19999);
+    assert.equal(pushes.length, 1);
+    await h.advance(1);
+    assert.equal(manager.getCurrentSong().id, 17);
+    assert.equal(pushes.length, 2);
+    engine.setEnabled(false);
     manager.cleanup();
     assert.equal(h.timers.size, 0);
   });
@@ -437,7 +612,7 @@ test('idle progress reset cannot replace the interrupted position before a URL r
   });
 });
 
-for (const status of [0, 1, 2]) {
+for (const status of [0, 1, 2, 3]) {
   test(`advancing restarted audio is restored at the interrupted position despite status=${status}`, async () => {
     await withClock(async h => {
       const s = voiceSession({ readState: () => ({
@@ -516,7 +691,7 @@ test('issue 171 HTTP and WebSocket status fusion cannot cancel voice recovery af
   });
 });
 
-for (const status of [0, 1, 2]) {
+for (const status of [0, 1, 2, 3]) {
   test(`issues 171 and 449: advancing buffered music at status=${status} must not be re-pushed for clock drift`, async () => {
     await withClock(async h => {
       const s = voiceSession({ readState: () => ({ status, position: 48 + (Date.now() - 100000) / 1000,
@@ -653,14 +828,14 @@ test('a low advancing counter without media identity cannot prove a restart or r
   });
 });
 
-for (const scenario of ['query failure', 'missing progress', 'cached idle', 'cached playing', 'pre-interaction sample']) {
+for (const scenario of ['query failure', 'cached idle', 'cached playing', 'cached status-only', 'pre-interaction sample']) {
   test(`${scenario} cannot prove that speech ended or trigger a URL repush`, async () => {
     await withClock(async h => {
       const s = voiceSession({
         timeout: 5, readState: () => ({
           status: scenario === 'query failure' ? -1 : scenario === 'cached idle' ? 2 : 1,
           position: 60, duration: 300,
-          hasPosition: scenario !== 'missing progress',
+          hasPosition: scenario !== 'cached status-only',
           sampledAt: scenario === 'pre-interaction sample' ? 99999
             : scenario.startsWith('cached') ? 101000 : Date.now(),
         })
@@ -1699,6 +1874,43 @@ test('idle after a chime resumes the current song and excludes detection/wait ti
     s.manager.cleanup();
   });
 });
+
+for (const [seek, speed] of [[0, 1], [60, 0.5], [40, 2]]) {
+  test(`issue 481: status 3 after an hourly chime restores seek=${seek} speed=${speed} and the next transition`, async () => {
+    await withClock(async h => {
+      let landedAt = 0;
+      const s = await hourlySession(h, { seek, speed, readState: () => landedAt ? {
+        status: 1, position: (Date.now() - landedAt) / 1000,
+        duration: (300 - s.manager.getStreamSeekOffsetSec()) / speed, hasPosition: true, sampledAt: Date.now(),
+      } : { status: 3, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() } });
+      assert.equal(s.manager.isHourlyResumePending(), true);
+      const position = seek + 120 * speed;
+      assert.equal(s.manager.getPosition(), position);
+      const push = s.manager.minaService.playURL;
+      s.manager.minaService.playURL = async (...args) => { landedAt = Date.now(); return push(...args); };
+      await h.advance(8000);
+      assert.equal(s.pushes.length, 1);
+      assert.ok(s.pushes[0].includes(`seek=${position}`));
+      if (speed !== 1) assert.ok(s.pushes[0].includes(`speed=${speed}`));
+      const endAt = landedAt + (300 - position) / speed * 1000;
+      await h.advance(endAt - Date.now() - 1);
+      assert.equal(s.pushes.length, 1);
+      assert.equal(s.manager.currentIndex, 0);
+      await h.advance(1);
+      assert.equal(s.pushes.length, 2);
+      assert.ok(s.pushes[1].includes('/songs/17/play'));
+      assert.equal(s.manager.state, 'playing');
+      assert.equal(s.manager.unplayableSongs.size, 0);
+      await h.advance(300000 / speed - 1);
+      assert.equal(s.pushes.length, 2);
+      await h.advance(1);
+      assert.equal(s.pushes.length, 3);
+      assert.ok(s.pushes[2].includes('/songs/18/play'));
+      s.manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
 
 test('a successful resume response without progress falls back to seek on the same song', async () => {
   await withClock(async h => {

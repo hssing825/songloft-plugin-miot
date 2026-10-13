@@ -29,7 +29,9 @@ const { IndexingManager } = loadSource('../src/indexing/manager.ts', {
 });
 const { MusicCommandService: VoiceEngine } = loadSource('../src/music/service.ts', {
   './guards': loadSource('../src/music/guards.ts'),
-  '../playback/voice_resume': loadSource('../src/playback/voice_resume.ts'),
+  '../playback/voice_resume': loadSource('../src/playback/voice_resume.ts', {
+    './device_state': loadSource('../src/playback/device_state.ts'),
+  }),
   '../playback/sleep_timer': loadSource('../src/playback/sleep_timer.ts', { '../sleep_timer': sleepTimer }),
   '../config/manager': {},
   '../account/manager': {},

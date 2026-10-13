@@ -111,8 +111,9 @@ function syncManagerFromDeviceState(
   deviceStreamDuration: number,
   deviceProgressAdvanced: boolean,
 ): void {
-  // 报时等待期间可能读到播报媒体，不能抢走恢复任务或改写保存的位置。
-  if (manager.isHourlyResumePending()) return;
+  // 恢复协调器拥有挂起期间的播放控制权。单次状态、保存锚点及 UI 外推都不能证明已续播，
+  // resetAutoNextTimer 会递增版本并取消旧恢复任务；确认进度后由协调器统一重建定时器（#481）。
+  if (manager.isHourlyResumePending() || manager.isVoiceSuspended()) return;
 
   // 小爱在 URL/MUSIC 播放模式下会偶发把正常播放的流上报成 paused/stopped。
   // 读状态接口不能因此清掉本地自动切歌定时器；只有设备确认在播放时才用它校准恢复。
@@ -122,16 +123,6 @@ function syncManagerFromDeviceState(
     // 导致网页进度条归零、续播位置算错（songloft-org/songloft-plugin-miot#60）。
     if (deviceReportsProgress) {
       manager.resetAutoNextTimer(devicePosition);
-    }
-  } else if (localState === 'playing' && deviceState === 'playing' && manager.isVoiceSuspended()) {
-    // 语音交互挂起期间设备「在播放」，可能是小爱在放它自己的内容而不是我们的流。
-    // 拿它的进度重锚定时器 = 把小爱内容的位置当成我们歌的位置，剩余时长直接算错，
-    // 到点就跳歌（songloft-org/songloft-plugin-miot#96）。认出是外来媒体就不校准，
-    // 交给 smartResume 去重推 URL；'unknown'（设备不报流长）保持旧行为。
-    if (manager.matchDeviceStream({ status: 1, duration: deviceStreamDuration }) !== 'foreign') {
-      manager.resetAutoNextTimer(devicePosition, deviceReportsProgress);
-    } else {
-      songloft.log.warn(`[player/status] Voice-suspended but speaker plays foreign media (deviceDuration=${deviceStreamDuration}s), skip timer calibration`);
     }
   } else if (localState === 'playing' && deviceState === 'playing') {
     // 远程歌曲需要缓冲时间，本地定时器从发送 URL 就开始计时，
@@ -210,7 +201,7 @@ export async function resolvePlayerStatus(
   return {
     ...localStatus,
     state: resolveReportState(localStatus.state, cached.state),
-    position: manager.isHourlyResumePending() ? localStatus.position
+    position: (manager.isHourlyResumePending() || manager.isVoiceSuspended()) ? localStatus.position
       : resolveReportPosition(localStatus.state, cached.state, localStatus.position, extrapolated),
     duration,
     volume: cached.volume,

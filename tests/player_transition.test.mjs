@@ -36,6 +36,7 @@ const { MinaService } = loadSource('../src/service/service.ts', {
   '../mina/constants': constants,
 });
 const { PlaylistManager } = loadSource('../src/player/manager.ts', {
+  '../playback/device_state': loadSource('../src/playback/device_state.ts', {}),
   '../config/manager': { playlistProgressScope: () => 'account:speaker' },
   './url_builder': {},
   '../utils/http': {},
@@ -184,8 +185,9 @@ for (const outcome of ['success', 'failure']) {
 test('issue 495 waits for an episode with 2.6 seconds left despite a mismatched device duration', async () => {
   await withClock(async h => {
     const deadlineAt = Date.now() + 100;
+    let looped = false;
     const p = player(async () => ({
-      status: 1, position: Math.min(764, 761.385 + Math.max(0, Date.now() - deadlineAt) / 1000),
+      status: 1, position: looped ? 0 : Math.min(764, 761.385 + Math.max(0, Date.now() - deadlineAt) / 1000),
       duration: 900, hasPosition: true, sampledAt: Date.now(),
     }), { duration: 764 });
     p.manager.startCheckTimer(0.1);
@@ -195,6 +197,9 @@ test('issue 495 waits for an episode with 2.6 seconds left despite a mismatched 
     await h.advance(2615);
     assert.equal(p.finished(), 0);
     await h.advance(2385);
+    assert.equal(p.finished(), 0, 'reaching metadata duration does not prove that the mismatched stream ended');
+    looped = true;
+    await h.advance(5000);
     assert.equal(p.finished(), 1);
     assert.equal(h.timers.size, 0);
     assert.equal(p.manager.getCurrentSong().duration, 764);
@@ -217,11 +222,112 @@ for (const speed of [0.5, 1, 2]) {
       assert.ok(h.logs.some(l => l.includes('Timer deferred:')));
       position = (764 - 500) / speed;
       await h.advance(Math.ceil(1615 / speed));
+      assert.equal(p.finished(), 0);
+      await h.advance(5000);
+      assert.equal(p.finished(), 0, 'measured playback at metadata duration must retain ending verification');
+      position = 0;
+      await h.advance(5000);
       assert.equal(p.finished(), 1);
       assert.equal(h.timers.size, 0);
     });
   });
 }
+
+for (const interruption of ['query failure', 'missing position', 'missing duration', 'unknown status', 'cached', 'frozen', 'jumped', 'changed duration']) {
+  test(`confirmed tail beyond metadata retains bounded grace after ${interruption}`, async () => {
+    await withClock(async h => {
+      const startedAt = Date.now();
+      let mode = 'playing';
+      let lastPosition = 0;
+      let lastSampleAt = 0;
+      const p = player(async () => {
+        if (mode === 'query failure') throw new Error('cloud failure');
+        if (mode === 'playing') {
+          lastPosition = 300 + (Date.now() - startedAt) / 1000;
+          lastSampleAt = Date.now();
+        }
+        return {
+          status: mode === 'unknown status' ? -1 : 1,
+          position: mode === 'missing position' ? 0 : lastPosition + (mode === 'jumped' ? 100 : 0),
+          duration: mode === 'missing duration' ? 0 : mode === 'changed duration' ? 900 : 500,
+          hasPosition: mode !== 'missing position',
+          sampledAt: mode === 'cached' ? lastSampleAt : Date.now(),
+        };
+      });
+      p.manager.startCheckTimer(0.1);
+      await h.advance(45100);
+      assert.equal(p.finished(), 0);
+      assert.equal(p.manager.deadlineTailEvidence.confirmed, true);
+      mode = interruption;
+      await h.advance(29999);
+      assert.equal(p.finished(), 0);
+      await h.advance(1);
+      assert.equal(p.finished(), 1);
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+for (const interruption of ['query failure', 'missing position', 'missing duration', 'unknown status']) {
+  test(`tail continuity can recover beyond metadata after a short ${interruption}`, async () => {
+    await withClock(async h => {
+      const startedAt = Date.now();
+      let mode = 'playing';
+      const p = player(async () => {
+        if (mode === 'query failure') throw new Error('cloud failure');
+        return {
+          status: mode === 'unknown status' ? -1 : 1,
+          position: 300 + (Date.now() - startedAt) / 1000,
+          duration: mode === 'missing duration' ? 0 : 500,
+          hasPosition: mode !== 'missing position', sampledAt: Date.now(),
+        };
+      });
+      p.manager.startCheckTimer(0.1);
+      await h.advance(45100);
+      mode = interruption;
+      await h.advance(10000);
+      assert.equal(p.finished(), 0);
+      mode = 'playing';
+      await h.advance(25000);
+      assert.equal(p.finished(), 0, 'recovered measured progress must supersede the original grace deadline');
+      p.manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+test('tail confirmation survives a stationary first sample after a short cloud failure', async () => {
+  await withClock(async h => {
+    const startedAt = Date.now();
+    let mode = 'playing';
+    let position = 0;
+    let resumedAt = 0;
+    let resumedPosition = 0;
+    const p = player(async () => {
+      if (mode === 'failed') throw new Error('temporary cloud failure');
+      if (mode === 'playing') position = resumedAt
+        ? resumedPosition + (Date.now() - resumedAt) / 1000
+        : 300 + (Date.now() - startedAt) / 1000;
+      return { status: 1, position, duration: 500, hasPosition: true, sampledAt: Date.now() };
+    });
+    p.manager.startCheckTimer(0.1);
+    await h.advance(45100);
+    assert.equal(p.finished(), 0);
+    mode = 'failed';
+    await h.advance(10000);
+    mode = 'stationary';
+    await h.advance(5000);
+    assert.equal(p.finished(), 0);
+    assert.equal(p.manager.deadlineTailEvidence?.confirmed, true);
+    resumedAt = Date.now();
+    resumedPosition = position;
+    mode = 'playing';
+    await h.advance(25000);
+    assert.equal(p.finished(), 0, 'new measured progress beyond the metadata tail must keep postponing completion');
+    p.manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  });
+});
 
 for (const signal of ['cached', 'frozen', 'jumped', 'voice suspended', 'mid-song']) {
   test(`mismatched duration cannot establish current tail progress from ${signal} evidence`, async () => {
@@ -1059,11 +1165,11 @@ test('issues 437 and 124: status-only playback with unknown duration waits for r
 });
 
 // Observed tuples from songloft-org/songloft#495 on 2026-10-12; metadata and stream duration disagree.
-for (const [duration, position, streamDuration] of [[519, 518.995, 3090.081], [736, 736.275, 803.559]]) {
-  test(`issues 495 and 124: measured ${position}s/${streamDuration}s retains confirmation after progress disappears`, async () => {
+for (const [duration, seek, position, streamDuration] of [[631, 112, 518.995, 3090.081], [736, 0, 736.275, 803.559]]) {
+  test(`issues 495 and 124: measured ${position}s/${streamDuration}s seek=${seek} retains confirmation after progress disappears`, async () => {
     await withClock(async h => {
       let state = { status: 1, position, duration: streamDuration, hasPosition: true, sampledAt: Date.now() };
-      const p = player(async () => state, { duration });
+      const p = player(async () => state, { duration, seek });
       p.manager.startCheckTimer(0.1);
       await h.advance(100);
       assert.equal(p.finished(), 0);
