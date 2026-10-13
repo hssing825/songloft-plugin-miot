@@ -11,6 +11,13 @@ This is the development entry point for `songloft-org/songloft-plugin-miot`, cov
 - Keep this file and `AGENTS.md` synchronized in content and structure. Use Conventional Commits, prefer Chinese descriptions, and omit `Co-Authored-By`.
 - Commit messages may use `#124` for local issues; parent issues require the full reference, such as `songloft-org/songloft#495`. Commit the subrepository before updating its pointer in the parent; the server and plugin upgrade independently.
 
+## AI Development, Issue Triage, and Retrospectives
+
+- See the [AI workflow](docs/en/ai-development.md) and [LESSONS](LESSONS.en.md). Investigate, implement, validate, and self-review continuously without stage approvals. Ask for essential missing information, product decisions, or scope expansion. Commits, pushes, releases, and Issue writes need distinct authorization; do not repeat granted permission requests.
+- Read relevant lessons before work and record evidence-backed experience afterward in Chinese/English. Three independent events on distinct dates make promotion candidates; repeated reviews of one incident do not increase counts. Existing device regression constraints apply immediately.
+- Unresolved Issue triage includes the parent and all recursive submodules with deduplication/full pagination. Read bodies, all comments, current code, and fix/recurrence evidence. Report full references and gaps rather than treating open status as proof of an unfixed bug. Assess plugin fix, parent pointer, publication, and installed versions separately.
+- Bind validation to plugin/backend repository SHAs, device/firmware, audio source, commands, and observed results; list relevant `Not run`. Changes need affected checks again. Cloud acknowledgments, UI estimates, and simulations are not device measurements or audible playback; explicitly state missing real-speaker/long-running checks.
+
 ## Validation commands
 
 Run in this repository:
