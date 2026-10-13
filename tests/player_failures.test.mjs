@@ -142,6 +142,127 @@ function player({ mode = 'loop', config = {}, service = {}, initialSongs = songs
   return { manager, pushes, tts };
 }
 
+for (const firstReportsProgress of [false, true]) {
+  test(`issue 124 the queue advances without extra grace when the first stream reports progress=${firstReportsProgress}`, async () => {
+    await withClock(async h => {
+      const startedAt = Date.now();
+      const { manager, pushes } = player({
+        mode: 'order',
+        initialSongs: songs.map(song => ({ ...song, duration: 20 })),
+        service: {
+          getPlayState: async () => {
+            const measured = firstReportsProgress && manager.currentIndex === 0;
+            return {
+              status: 1, position: measured ? (Date.now() - startedAt) / 1000 : 0,
+              duration: measured ? 20 : 0, hasPosition: measured
+            };
+          }
+        },
+      });
+      assert.equal(await manager.playCurrent(), true);
+      assert.equal(pushes.length, 1);
+      for (const id of [17, 18]) {
+        await h.advance(19999);
+        assert.equal(manager.getCurrentSong().id, id - 1);
+        await h.advance(1);
+        assert.equal(manager.getCurrentSong().id, id);
+        assert.ok(pushes.at(-1).includes(`/songs/${id}/play`));
+        assert.equal(manager.state, 'playing');
+      }
+      await h.advance(20000);
+      assert.equal(manager.state, 'stopped');
+      assert.equal(pushes.length, 3);
+      assert.equal(h.logs.some(l => l.includes('Timer retry:')), false);
+      manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+test('resume verification progress protects the deadline when later samples have no position', async () => {
+  await withClock(async h => {
+    let missing = false;
+    const { manager, pushes } = player({
+      service: {
+        resumePlay: async () => true,
+        getPlayState: async () => ({
+          status: 1, position: missing ? 0 : 288 + (Date.now() - 100000) / 1000,
+          duration: missing ? 0 : 300, hasPosition: !missing, sampledAt: Date.now()
+        }),
+      }
+    });
+    manager.state = 'paused';
+    manager.pausedPositionSec = 290;
+    assert.equal(await manager.resumePlayback(), true);
+    // Isolate the resume verifier from the independent tail probe.
+    clearTimeout(manager.tailProbeTimer);
+    manager.tailProbeTimer = null;
+    await h.advance(2000);
+    missing = true;
+    await h.advance(8000);
+    assert.equal(pushes.length, 0);
+    await h.advance(30000);
+    assert.equal(pushes.length, 1);
+    assert.equal(manager.getCurrentSong().id, 17);
+    manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+for (const mode of ['order', 'loop', 'random', 'single', 'singlePlay']) {
+  for (const targetCount of [1, 2]) {
+    test(`issues 124 and 494: status-only completion preserves ${mode} with ${targetCount} targets`, async () => {
+      await withClock(async h => {
+        const { manager, pushes, tts } = player({
+          mode,
+          initialSongs: songs.map(song => ({ ...song, duration: 20 })),
+          service: { getPlayState: async () => ({ status: 1, position: 0, duration: 0, hasPosition: false }) },
+        });
+        manager.setTargets(Array.from({ length: targetCount }, (_, i) => ({ account_id: 'account', device_id: `speaker-${i}` })));
+        assert.equal(await manager.playCurrent(), true);
+        await h.advance(20000);
+        assert.equal(manager.getCurrentSong().id, mode === 'single' || mode === 'singlePlay' ? 16 : 17);
+        assert.equal(manager.state, mode === 'singlePlay' ? 'paused' : 'playing');
+        assert.equal(pushes.length, targetCount * (mode === 'singlePlay' ? 1 : 2));
+        assert.equal(manager.isSongUnplayable(16), false);
+        assert.deepEqual(tts, []);
+        manager.cleanup();
+        assert.equal(h.timers.size, 0);
+      });
+    });
+  }
+}
+
+for (const probe of ['tailProbe', 'checkExternalStop', 'verifyPlaybackLanded', 'verifyTimerDeadline']) {
+  test(`issues 124 and 514: late ${probe} progress cannot add grace to a replacement stream`, async () => {
+    await withClock(async h => {
+      const slow = deferred();
+      let firstQuery = true;
+      const { manager, pushes } = player({
+        service: {
+          getPlayState: () => {
+            if (firstQuery) { firstQuery = false; return slow.promise; }
+            return Promise.resolve({ status: 1, position: 0, duration: 0, hasPosition: false });
+          },
+        }
+      });
+      manager.startCheckTimer(60);
+      const pending = probe === 'verifyPlaybackLanded' ? manager.verifyPlaybackLanded(0, 16, 0) : manager[probe]();
+      await flush();
+      manager.prepareForNewPlayback();
+      manager.state = 'playing';
+      manager.startCheckTimer(10);
+      slow.resolve({ status: 1, position: 280, duration: 300, hasPosition: true, sampledAt: Date.now() });
+      await pending;
+      await h.advance(10000);
+      assert.equal(manager.getCurrentSong().id, 17);
+      assert.equal(pushes.length, 1);
+      manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
 function resumeEngine(manager) {
   const engine = Object.create(VoiceEngine.prototype);
   engine.enabled = true;
@@ -191,6 +312,71 @@ function voiceSession({ readState, timeout = 30, resumeResult = true, duration =
   engine.scheduleSmartResume(manager, 'account', 'speaker');
   return { manager, engine, pushes, queries, resumes };
 }
+
+test('issues 124 and 516: status-only smart resume does not turn the saved anchor into measured progress', async () => {
+  await withClock(async h => {
+    const s = voiceSession({
+      timeout: 5, position: 290,
+      readState: () => ({ status: 1, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() }),
+    });
+    await h.advance(5000);
+    assert.equal(s.manager.isVoiceSuspended(), false);
+    assert.equal(s.manager.getPosition(), 290);
+    assert.equal(s.resumes.length, 0);
+    await h.advance(9999);
+    assert.equal(s.pushes.length, 0);
+    await h.advance(1);
+    assert.equal(s.manager.getCurrentSong().id, 17);
+    assert.equal(s.pushes.length, 1);
+    s.manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+test('issues 124 and 171: a status-only HTTP snapshot during suspension keeps metadata fallback', async () => {
+  await withClock(async h => {
+    const { manager, pushes } = player({
+      initialSongs: songs.map(song => ({ ...song, duration: 20 })),
+      service: {
+        getPlayerStatus: async () => ({ data: { info: JSON.stringify({ status: 1, volume: 30 }) }, sampledAt: Date.now() }),
+        getPlayState: async () => ({ status: 1, position: 0, duration: 0, hasPosition: false }),
+      },
+    });
+    manager.playStartTimeMs = Date.now();
+    manager.startCheckTimer(20);
+    manager.suspendForVoiceInteraction();
+    updateDeviceStatusCache('account', 'speaker', { timestamp: 0 });
+    await resolvePlayerStatus({ getOrCreate: async () => manager }, manager.minaService, 'account', 'speaker');
+    await flush();
+    await h.advance(19999);
+    assert.equal(pushes.length, 0);
+    await h.advance(1);
+    assert.equal(manager.getCurrentSong().id, 17);
+    assert.equal(pushes.length, 1);
+    manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+test('issues 495 and 516: genuine smart-resume progress survives a later cloud failure', async () => {
+  await withClock(async h => {
+    const s = voiceSession({
+      timeout: 5, position: 290,
+      readState: n => n === 1
+        ? { status: 1, position: 290, duration: 300, hasPosition: true, sampledAt: Date.now() }
+        : { status: Date.now() < 105000 ? -1 : 1, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() },
+    });
+    await h.advance(15000);
+    assert.equal(s.pushes.length, 0);
+    await h.advance(29999);
+    assert.equal(s.pushes.length, 0);
+    await h.advance(1);
+    assert.equal(s.manager.getCurrentSong().id, 17);
+    assert.equal(s.pushes.length, 1);
+    s.manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  });
+});
 
 test('a short voice reply resumes promptly with fresh samples and keeps the interrupted position', async () => {
   await withClock(async h => {

@@ -68,6 +68,7 @@ export class VoiceResumeCoordinator {
     let lastSampleAt = -1;
     let lastStatus = -1;
     let progressStalled = false;
+    let deviceReportsProgress = false;
 
     while (Date.now() - task.startedAt < maxWaitMs) {
       if (!isCurrent()) return;
@@ -89,6 +90,7 @@ export class VoiceResumeCoordinator {
       } else if (sampleAt >= task.startedAt && sampleAt > lastSampleAt) {
         lastSampleAt = sampleAt;
         lastStatus = st.status;
+        if (st.hasPosition && Number.isFinite(st.position) && st.position >= 0) deviceReportsProgress = true;
         const stream = pm.matchDeviceStream({ ...st, status: 1 });
         const positionRegressed = st.hasPosition && pm.hasDevicePositionRegressed(st.position, resumePosition);
         // 某些固件在实际播放时连续误报 paused/stopped；进度推进时只校准，不再发 play（#449）。
@@ -152,7 +154,8 @@ export class VoiceResumeCoordinator {
     if (!deviceBecameIdle && !deviceRestarted && (lastStatus < 0 || (!deviceTakenOver && !progressStalled))) {
       // 未知状态/缺失进度不能证明已续播，也不能据此重推。恢复本地驱动，不发送设备指令。
       songloft.log.warn('[VoiceEngine] Smart resume timed out without playback evidence; restoring timer only');
-      pm.resetAutoNextTimer(resumePosition);
+      // 保存锚点可能只有本地外推位置，不能把它当作设备真实上报的进度（#124）。
+      pm.resetAutoNextTimer(resumePosition, deviceReportsProgress);
       return;
     }
 

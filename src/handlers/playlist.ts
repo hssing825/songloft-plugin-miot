@@ -129,7 +129,7 @@ function syncManagerFromDeviceState(
     // 到点就跳歌（songloft-org/songloft-plugin-miot#96）。认出是外来媒体就不校准，
     // 交给 smartResume 去重推 URL；'unknown'（设备不报流长）保持旧行为。
     if (manager.matchDeviceStream({ status: 1, duration: deviceStreamDuration }) !== 'foreign') {
-      manager.resetAutoNextTimer(devicePosition);
+      manager.resetAutoNextTimer(devicePosition, deviceReportsProgress);
     } else {
       songloft.log.warn(`[player/status] Voice-suspended but speaker plays foreign media (deviceDuration=${deviceStreamDuration}s), skip timer calibration`);
     }

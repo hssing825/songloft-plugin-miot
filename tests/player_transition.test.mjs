@@ -865,6 +865,217 @@ test('missing device evidence retries for thirty seconds after the metadata dead
   });
 });
 
+for (const status of [0, 1, 2]) {
+  test(`issue 124 status-only device switches at the metadata deadline with status=${status}`, async () => {
+    await withClock(async h => {
+      const deadlineAt = Date.now() + 240000;
+      const service = new MinaService({}, {});
+      service.getPlayerStatus = async () => ({
+        data: { info: JSON.stringify({ status: Date.now() < deadlineAt ? 1 : status, volume: 30 }) },
+        sampledAt: Date.now(),
+      });
+      const p = player(() => service.getPlayState('account', 'speaker'), { duration: 240 });
+      p.manager.startCheckTimer(240);
+      await h.advance(239999);
+      assert.equal(p.finished(), 0);
+      await h.advance(1);
+      assert.equal(p.finished(), 1);
+      assert.ok(h.logs.some(l => l.includes('device has no position, using metadata deadline')));
+      assert.equal(h.logs.some(l => l.includes('Timer retry:')), false);
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+for (const { seek, speed, offset } of [
+  { seek: 0, speed: 1, offset: 3 },
+  { seek: 216, speed: 1, offset: 0 },
+  { seek: 200, speed: 2, offset: 2 },
+]) {
+  test(`issue 124 metadata fallback preserves seek=${seek} speed=${speed} offset=${offset}`, async () => {
+    await withClock(async h => {
+      const p = player(async () => ({ status: 1, position: 0, duration: 0, hasPosition: false }), {
+        duration: 240, seek, speed,
+      });
+      p.manager.transitionOffset = offset;
+      const delayMs = (240 + offset - seek) / speed * 1000;
+      p.manager.startCheckTimer(delayMs / 1000);
+      await h.advance(delayMs - 1);
+      assert.equal(p.finished(), 0);
+      await h.advance(1);
+      assert.equal(p.finished(), 1);
+      await h.advance(30000);
+      assert.equal(p.finished(), 1);
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+test('status-only fallback never advances before the original metadata deadline', async () => {
+  await withClock(async h => {
+    const p = player(async () => ({ status: 1, position: 0, duration: 0, hasPosition: false }));
+    p.manager.startCheckTimer(10);
+    p.manager.scheduleDeadlineCheck(100);
+    await h.advance(9999);
+    assert.equal(p.finished(), 0);
+    await h.advance(1);
+    assert.equal(p.finished(), 1);
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+for (const probe of ['tailProbe', 'checkExternalStop', 'verifyPlaybackLanded']) {
+  test(`progress seen by ${probe} keeps grace when position later disappears`, async () => {
+    await withClock(async h => {
+      let state = playing(280);
+      const p = player(async () => state);
+      p.manager.startCheckTimer(10);
+      if (probe === 'tailProbe') await h.advance(1);
+      else if (probe === 'verifyPlaybackLanded') await p.manager.verifyPlaybackLanded(0, 1, 0);
+      else await p.manager[probe]();
+      // Recalibration must keep earlier progress history when the latest sample disappears.
+      p.manager.resetAutoNextTimer(290);
+      state = { status: 1, position: 0, duration: 0, hasPosition: false };
+      await h.advance(10000);
+      assert.equal(p.finished(), 0);
+      await h.advance(29999);
+      assert.equal(p.finished(), 0);
+      await h.advance(1);
+      assert.equal(p.finished(), 1);
+      assert.equal(h.logs.some(l => l.includes('device has no position, using metadata deadline')), false);
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+test('an explicit zero position still counts as reported progress before it disappears', async () => {
+  await withClock(async h => {
+    let state = playing(0);
+    const p = player(async () => state);
+    p.manager.startCheckTimer(10);
+    await h.advance(1);
+    state = { status: 1, position: 0, duration: 0, hasPosition: false };
+    await h.advance(10000);
+    assert.equal(p.finished(), 0);
+    await h.advance(30000);
+    assert.equal(p.finished(), 1);
+  });
+});
+
+for (const measured of [false, true]) {
+  test(`${measured ? 'measured' : 'estimated'} calibration distinguishes temporary progress loss from a status-only device`, async () => {
+    await withClock(async h => {
+      const p = player(async () => ({ status: 1, position: 0, duration: 0, hasPosition: false }));
+      p.manager.resetAutoNextTimer(290, measured);
+      await h.advance(10000);
+      assert.equal(p.finished(), measured ? 0 : 1);
+      await h.advance(30000);
+      assert.equal(p.finished(), 1);
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+test('voice suspension and soft resumption retain the current stream progress history', async () => {
+  await withClock(async h => {
+    let state = playing(280);
+    const p = player(async () => state);
+    p.manager.startCheckTimer(10);
+    await h.advance(1);
+    p.manager.suspendForVoiceInteraction();
+    state = { status: 1, position: 0, duration: 0, hasPosition: false };
+    p.manager.resetAutoNextTimer(290, false);
+    await h.advance(10000);
+    assert.equal(p.finished(), 0);
+    await h.advance(30000);
+    assert.equal(p.finished(), 1);
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+test('deadline progress history survives repeated missing samples after deferral', async () => {
+  await withClock(async h => {
+    let state = playing(290);
+    const p = player(async () => state);
+    p.manager.startCheckTimer(0.1);
+    await h.advance(100);
+    state = { status: 1, position: 0, duration: 0, hasPosition: false };
+    await h.advance(10000);
+    assert.equal(p.finished(), 0);
+    await h.advance(29999);
+    assert.equal(p.finished(), 0);
+    await h.advance(1);
+    assert.equal(p.finished(), 1);
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+test('a new playback does not inherit progress support from the previous stream', async () => {
+  await withClock(async h => {
+    let state = playing(280);
+    const p = player(async () => state);
+    p.manager.startCheckTimer(10);
+    await h.advance(1);
+    p.manager.prepareForNewPlayback();
+    p.manager.state = 'playing';
+    state = { status: 1, position: 0, duration: 0, hasPosition: false };
+    p.manager.startCheckTimer(10);
+    await h.advance(10000);
+    assert.equal(p.finished(), 1);
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+test('a duration-only device can switch after discovering an unknown song duration', async () => {
+  await withClock(async h => {
+    const p = player(async () => ({ status: 1, position: 0, duration: 20, hasPosition: false }), { duration: 0 });
+    p.manager.scheduleDurationProbe();
+    await h.advance(5000);
+    assert.equal(p.manager.getCurrentSong().duration, 20);
+    await h.advance(19999);
+    assert.equal(p.finished(), 0);
+    await h.advance(1);
+    assert.equal(p.finished(), 1);
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+test('issues 437 and 124: status-only playback with unknown duration waits for real duration evidence', async () => {
+  await withClock(async h => {
+    let duration = 0;
+    const p = player(async () => ({ status: 1, position: 0, duration, hasPosition: false }), { duration: 0 });
+    p.manager.scheduleDurationProbe();
+    await h.advance(600000);
+    assert.equal(p.finished(), 0);
+    assert.equal(p.manager.checkTimer, null);
+    duration = 20;
+    await h.advance(5000);
+    await h.advance(19999);
+    assert.equal(p.finished(), 0);
+    await h.advance(1);
+    assert.equal(p.finished(), 1);
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+// Observed tuples from songloft-org/songloft#495 on 2026-10-12; metadata and stream duration disagree.
+for (const [duration, position, streamDuration] of [[519, 518.995, 3090.081], [736, 736.275, 803.559]]) {
+  test(`issues 495 and 124: measured ${position}s/${streamDuration}s retains confirmation after progress disappears`, async () => {
+    await withClock(async h => {
+      let state = { status: 1, position, duration: streamDuration, hasPosition: true, sampledAt: Date.now() };
+      const p = player(async () => state, { duration });
+      p.manager.startCheckTimer(0.1);
+      await h.advance(100);
+      assert.equal(p.finished(), 0);
+      state = { status: 1, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() + 5000 };
+      await h.advance(5000);
+      assert.equal(p.finished(), 0);
+      p.manager.stopCheckTimer();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
 test('a missing position field is not a stream reset, while an explicit zero is', async () => {
   await withClock(async h => {
     let info = { status: 1, play_song_detail: { position: 80000, duration: 100000 } };
@@ -1054,7 +1265,8 @@ test('negative transition offset preserves intentional early switching', async (
 });
 
 for (const state of [
-  { status: 1, position: 0, duration: 300, hasPosition: false },
+  { status: -1, position: 0, duration: 0, hasPosition: false },
+  { status: 1, position: 0, duration: 500, hasPosition: false },
   { status: 1, position: NaN, duration: 300, hasPosition: true },
   { status: 1, position: 100, duration: 500, hasPosition: true },
 ]) {
@@ -1088,6 +1300,7 @@ for (const reset of ['pause', 'same-song restart', 'timer calibration']) {
         await pending;
         assert.equal(p.finished(), 0);
         assert.deepEqual([...h.timers.keys()], timers);
+        assert.equal(p.manager.devicePositionObserved, false);
         p.manager.stopCheckTimer();
       });
     });
