@@ -96,6 +96,9 @@ const PUSH_VERIFY_DELAY_MS = 1200;
  */
 const PUSH_VERIFY_START_WINDOW_SEC = 30;
 
+/** 续播位置允许五秒流内误差，容忍设备取整、缓冲与本地计时偏差。 */
+const RESUME_POSITION_TOLERANCE_SEC = 5;
+
 /**
  * duration==0 时的兜底切歌探测参数（songloft-org/songloft#437）。
  *
@@ -1065,6 +1068,35 @@ export class PlaylistManager {
   }
 
   /**
+   * 设备进度是否明显落在续播锚点之前（songloft-org/songloft#516）。
+   * position 推进只能证明音频在播放，不能证明它从原位置继续；固件重载同一 URL 后
+   * 也会从零推进。明显落后也可能是缓冲，不能仅凭这个比较重推。
+   * 先换成曲内绝对位置，再比较，避免把带 seek/倍速的正常流当成重播。
+   * 该判据必须与新采样、流身份及连续进度证据一起使用，不能单凭本地计时重推。
+   */
+  hasDevicePositionRegressed(devicePositionSec: number, resumePositionSec: number): boolean {
+    if (!Number.isFinite(devicePositionSec) || devicePositionSec < 0 ||
+      !Number.isFinite(resumePositionSec) || resumePositionSec < 0) return false;
+    const songPosition = devicePositionSec * this.playbackSpeed + this.streamSeekOffsetSec;
+    return songPosition < resumePositionSec - RESUME_POSITION_TOLERANCE_SEC * this.playbackSpeed;
+  }
+
+  /** 回零证据限定为流开头三秒；正常播放在中途落后本地计时不是重播。 */
+  isDeviceAtRestartPosition(devicePositionSec: number, resumePositionSec: number): boolean {
+    return devicePositionSec <= LOOP_DETECT_RESET_THRESHOLD_SEC &&
+      this.hasDevicePositionRegressed(devicePositionSec, resumePositionSec);
+  }
+
+  /** 自动续播落在最后三秒时，用保护区之前的最后一个整数秒，避免 seek 被丢弃后整首重播。 */
+  getSafeResumePosition(positionSec: number): number {
+    const song = this.getCurrentSong();
+    if (Number.isFinite(positionSec) && positionSec > 0 && song && song.type !== 'radio' && song.duration > 0) {
+      return Math.min(positionSec, Math.max(0, Math.ceil(song.duration - 3) - 1));
+    }
+    return positionSec;
+  }
+
+  /**
    * 恢复播放（使用 play 接口继续，不重发 URL）
    * 用于语音命令（如调音量）中断 URL 播放后恢复
    * 同时重置切歌定时器以补偿暂停时间
@@ -1201,7 +1233,14 @@ export class PlaylistManager {
       const stream = this.matchDeviceStream({ ...state, status: 1 });
       // #449：status 可能连续误报 paused/stopped；当前流的进度推进比状态码更可靠。
       if ((state.status === 0 || state.status === 1 || state.status === 2) && state.hasPosition && stream !== 'foreign') {
-        if (lastPosition >= 0 && state.position - lastPosition + 1e-6 >= 0.1) return;
+        if (lastPosition >= 0 && state.position - lastPosition + 1e-6 >= 0.1) {
+          if (stream === 'ours' && (this.isDeviceAtRestartPosition(state.position, resumeFromSec) ||
+            this.isDeviceAtRestartPosition(lastPosition, resumeFromSec))) {
+            repushReason = `device restarted media (position=${state.position}s resumePosition=${resumeFromSec}s)`;
+            break;
+          }
+          return;
+        }
       } else {
         lastPosition = -1;
       }
@@ -1232,8 +1271,9 @@ export class PlaylistManager {
 
     // 需要重推：先再确认一次上下文没变（最后一次查询也可能耗掉几百毫秒）
     if (!isCurrent()) return;
-    songloft.log.warn(`[PlaylistManager] Resume verify failed: ${repushReason}, re-pushing URL with seek=${resumeFromSec.toFixed(1)}s`);
-    await this.playCurrent({ seekSeconds: resumeFromSec, skipAnnouncement: true, isCurrent: taskIsCurrent ?? (() => true) });
+    const replayPosition = this.getSafeResumePosition(resumeFromSec);
+    songloft.log.warn(`[PlaylistManager] Resume verify failed: ${repushReason}, re-pushing URL with seek=${replayPosition.toFixed(1)}s`);
+    await this.replayCurrent(replayPosition, taskIsCurrent ?? (() => true));
   }
 
   /**
@@ -1361,6 +1401,11 @@ export class PlaylistManager {
   resetAutoNextTimer(devicePositionSec?: number): void {
     if (this.externalPlayback) return;
     if (this.state !== 'playing') return;
+    // /player/status 也会调用本方法；不能先用归零进度清掉挂起锚点和续播任务版本。
+    // 保留挂起状态，让智能续播通过新采样和流身份确认是否需要带位置重推。
+    if (this.isVoiceSuspended() && typeof devicePositionSec === 'number' &&
+      devicePositionSec <= this.streamSeekOffsetSec + LOOP_DETECT_RESET_THRESHOLD_SEC * this.playbackSpeed &&
+      devicePositionSec < this.voiceSuspendedPosition - RESUME_POSITION_TOLERANCE_SEC * this.playbackSpeed) return;
     this.stopCheckTimer();
     this.clearVoiceSuspend();
     const song = this.getCurrentSong();

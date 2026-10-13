@@ -59,6 +59,7 @@ export class VoiceResumeCoordinator {
     const maxWaitMs = timeoutSec * 1000;
     let deviceBecameIdle = false;
     let deviceTakenOver = false;
+    let deviceRestarted = false;
     let resumePosition = task.position;
     let fastQueries = 0;
     let idleConfirmationQueries = 0;
@@ -89,14 +90,25 @@ export class VoiceResumeCoordinator {
         lastSampleAt = sampleAt;
         lastStatus = st.status;
         const stream = pm.matchDeviceStream({ ...st, status: 1 });
+        const positionRegressed = st.hasPosition && pm.hasDevicePositionRegressed(st.position, resumePosition);
         // 某些固件在实际播放时连续误报 paused/stopped；进度推进时只校准，不再发 play（#449）。
         if ((st.status === 0 || st.status === 1 || st.status === 2) && stream !== 'foreign' && st.hasPosition) {
           if (lastPosition >= 0 && st.position - lastPosition + 1e-6 >= 0.1) {
-            songloft.log.info('[VoiceEngine] Device auto-resumed, progress confirmed; resetting timer only');
-            pm.resetAutoNextTimer(st.position * pm.getPlaybackSpeed() + pm.getStreamSeekOffsetSec());
-            return;
+            if (stream === 'ours' && (pm.isDeviceAtRestartPosition(st.position, resumePosition) ||
+              pm.isDeviceAtRestartPosition(lastPosition, resumePosition))) {
+              deviceRestarted = true;
+              songloft.log.warn(`[VoiceEngine] Device restarted media after voice interaction: position=${st.position}s resumePosition=${resumePosition}s`);
+              break;
+            }
+            if (!positionRegressed || stream === 'ours') {
+              songloft.log.info('[VoiceEngine] Device auto-resumed, progress confirmed; resetting timer only');
+              pm.resetAutoNextTimer(st.position * pm.getPlaybackSpeed() + pm.getStreamSeekOffsetSec());
+              return;
+            }
           }
-          progressStalled = lastPosition >= 0 && st.position >= lastPosition;
+          // 身份不明且位置回退不能证明重播，也不能据此把插件进度同步到开头。
+          progressStalled = lastPosition >= 0 && st.position >= lastPosition &&
+            (!positionRegressed || stream === 'ours');
           lastPosition = st.position;
         } else {
           lastPosition = -1;
@@ -106,7 +118,8 @@ export class VoiceResumeCoordinator {
           idleHits++;
           progressStalled = false;
           if (st.hasPosition && stream === 'ours') {
-            resumePosition = st.position * pm.getPlaybackSpeed() + pm.getStreamSeekOffsetSec();
+            // 固件在暂停/停止后可能把位置清零；保留打断锚点，仅接受更靠后的同曲位置。
+            resumePosition = Math.max(resumePosition, st.position * pm.getPlaybackSpeed() + pm.getStreamSeekOffsetSec());
           }
           // 两次新采样确认，给延迟启动的播报留出窗口，缓存不能累积命中。
           if (idleHits >= 2) {
@@ -136,7 +149,7 @@ export class VoiceResumeCoordinator {
     }
 
     if (!isCurrent()) return;
-    if (!deviceBecameIdle && (lastStatus < 0 || (!deviceTakenOver && !progressStalled))) {
+    if (!deviceBecameIdle && !deviceRestarted && (lastStatus < 0 || (!deviceTakenOver && !progressStalled))) {
       // 未知状态/缺失进度不能证明已续播，也不能据此重推。恢复本地驱动，不发送设备指令。
       songloft.log.warn('[VoiceEngine] Smart resume timed out without playback evidence; restoring timer only');
       pm.resetAutoNextTimer(resumePosition);
@@ -155,9 +168,10 @@ export class VoiceResumeCoordinator {
     // 被接管或超时仍无进度：带挂起时的位置重推，不把整个播报等待时间算成已听内容。
     // 失败推送自身只停一次定时器；版本再变化说明已有新操作，不能替它收尾。
     const replayRevision = pm.getPlaybackRevision() + 1;
-    const ok = await pm.replayCurrent(resumePosition, isTaskCurrent);
+    const replayPosition = pm.getSafeResumePosition(resumePosition);
+    const ok = await pm.replayCurrent(replayPosition, isTaskCurrent);
     if (ok) {
-      songloft.log.info(`[VoiceEngine] Playback restored via replay after voice interaction seek=${resumePosition.toFixed(1)}s`);
+      songloft.log.info(`[VoiceEngine] Playback restored via replay after voice interaction seek=${replayPosition.toFixed(1)}s`);
     } else if (isTaskCurrent() && pm.getPlaybackRevision() === replayRevision && pm.isPlaying() && pm.isVoiceSuspended()) {
       songloft.log.warn('[VoiceEngine] Failed to restore playback after voice interaction');
       await pm.stop(false);
