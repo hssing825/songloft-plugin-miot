@@ -2385,6 +2385,16 @@ export class PlaylistManager {
     }
     if (!fresh) return result;
     const previous = this.deadlineTailEvidence;
+    // 部分设备自然结束后删掉 play_song_detail（#495）。确认过的当前尾部流，
+    // 连续两份新鲜 idle 响应是停止证据；缺失进度的兜底零本身仍不是回零证据。
+    // 只接纳没有流长的 idle，保留外来媒体、查询失败和 playing 下缓冲的宽限。
+    if (previous?.confirmed && isDeviceIdle(st.status) && st.hasPosition === false && st.duration === 0 &&
+      sampleAt > previous.sampledAt && sampleAt - previous.sampledAt <= DEADLINE_GRACE_MS &&
+      previous.position * this.playbackSpeed + this.streamSeekOffsetSec >= song.duration - TAIL_STALL_NEAR_END_SEC) {
+      previous.interrupted = true;
+      previous.stopHits++;
+      return { advancing: false, ended: previous.stopHits >= TAIL_STOP_CONFIRM_COUNT };
+    }
     if (!st.hasPosition || !Number.isFinite(st.position) || st.position < 0 ||
       !Number.isFinite(st.duration) || st.duration <= 0 ||
       !isDeviceStatusKnown(st.status)) {

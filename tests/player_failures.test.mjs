@@ -150,8 +150,10 @@ for (const [duration, seek, position, streamDuration] of [
   [519, 0, 519.178, 577.345],
   [736, 0, 736.275, 803.559],
   [611, 0, 611.725, 743.936],
+  [593, 0, 593.3, 649.173],
+  [651, 0, 651.054, 723.289],
 ]) {
-  for (const ending of ['loop', 'stopped', 'stalled']) {
+  for (const ending of ['loop', 'stopped', 'stalled', 'idle without detail']) {
     test(`issue 495: ${duration}s episode seek=${seek} waits for ${ending} after sixty seconds of tail progress`, async () => {
       await withClock(async h => {
         const startedAt = Date.now();
@@ -162,6 +164,9 @@ for (const [duration, seek, position, streamDuration] of [
             getPlayState: async () => {
               if (manager.currentIndex !== 0) return { status: 1, position: 0, duration, hasPosition: true, sampledAt: Date.now() };
               const elapsed = (Date.now() - startedAt) / 1000;
+              if (ending === 'idle without detail' && elapsed >= 60) {
+                return { status: 0, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() };
+              }
               return {
                 status: ending === 'stopped' && elapsed >= 60 ? 0 : 1,
                 position: ending === 'loop' && elapsed >= 60 ? 0 : position + Math.min(60, elapsed),
@@ -199,6 +204,51 @@ for (const [duration, seek, position, streamDuration] of [
     });
   }
 }
+
+test('issue 495: successive episodes ending without detail advance promptly and preserve the following timer', async () => {
+  await withClock(async h => {
+    const metadata = [593, 651, 496];
+    const streamDurations = [649.173, 723.289, 496];
+    const actualDurations = [667, 735, 496];
+    const urls = [];
+    let streamStartedAt = Date.now();
+    const { manager, tts } = player({
+      mode: 'order', initialSongs: songs.map((song, i) => ({ ...song, duration: metadata[i] })),
+      service: {
+        playURL: async (_account, _device, url) => {
+          urls.push(url);
+          streamStartedAt = Date.now();
+          return true;
+        },
+        getPlayState: async () => {
+          const elapsed = (Date.now() - streamStartedAt) / 1000;
+          return elapsed >= actualDurations[manager.currentIndex]
+            ? { status: 0, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() }
+            : {
+              status: 1, position: elapsed, duration: streamDurations[manager.currentIndex],
+              hasPosition: true, sampledAt: Date.now()
+            };
+        },
+      },
+    });
+    assert.equal(await manager.playCurrent(), true);
+    for (let index = 0; index < 2; index++) {
+      await h.advance(streamStartedAt + actualDurations[index] * 1000 - Date.now() - 1);
+      assert.equal(manager.currentIndex, index, 'the episode must play through its actual end');
+      assert.equal(urls.length, index + 1);
+      await h.advance(10001);
+      assert.equal(manager.currentIndex, index + 1, 'the next episode must start within two fresh samples');
+      assert.equal(urls.length, index + 2);
+      assert.ok(urls[index + 1].includes(`/songs/${songs[index + 1].id}/play`));
+      assert.ok(manager.checkTimer !== null);
+      assert.equal(manager.state, 'playing');
+      assert.equal(manager.unplayableSongs.size, 0);
+      assert.deepEqual(tts, []);
+    }
+    manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  });
+});
 
 for (const operation of ['pause', 'voice suspension', 'same-song restart', 'next', 'new playlist', 'new artist playlist', 'external takeover', 'cleanup']) {
   test(`issue 495: ${operation} clears confirmed tail evidence and ignores an old deadline response`, async () => {

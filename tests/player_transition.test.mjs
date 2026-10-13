@@ -115,6 +115,92 @@ function player(readState, { duration = 300, seek = 0, speed = 1 } = {}) {
 
 const playing = position => ({ status: 1, position, duration: 300, hasPosition: true });
 
+for (const status of [0, 2, 3]) {
+  for (const speed of [0.5, 1, 2]) {
+    test(`confirmed tail accepts two fresh idle samples without detail: status=${status}, speed=${speed}`, async () => {
+      await withClock(async h => {
+        const startedAt = Date.now();
+        let ended = false;
+        const p = player(async () => ended
+          ? { status, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() }
+          : {
+            status: 1, position: (200 / speed) + (Date.now() - startedAt) / 1000,
+            duration: 500 / speed, hasPosition: true, sampledAt: Date.now()
+          },
+          { duration: 300, seek: 100, speed });
+        p.manager.startCheckTimer(0.1);
+        await h.advance(45100);
+        assert.equal(p.finished(), 0);
+        assert.equal(p.manager.deadlineTailEvidence.confirmed, true);
+        ended = true;
+        await h.advance(5000);
+        assert.equal(p.finished(), 0, 'one idle response can be a transient misreport');
+        await h.advance(4999);
+        assert.equal(p.finished(), 0);
+        await h.advance(1);
+        assert.equal(p.finished(), 1, 'two fresh idle responses must not wait for the full grace');
+        assert.equal(h.timers.size, 0);
+        assert.equal(p.manager.getCurrentSong().duration, 300);
+      });
+    });
+  }
+}
+
+for (const interruption of ['cached', 'query failure', 'playing without detail', 'unknown status', 'advancing', 'foreign duration']) {
+  test(`idle without detail cannot end confirmed playback after ${interruption}`, async () => {
+    await withClock(async h => {
+      const startedAt = Date.now();
+      let mode = 'advancing';
+      let idleSampleAt;
+      const p = player(async () => {
+        if (mode === 'query failure') throw new Error('cloud failure');
+        if (mode === 'advancing') return {
+          status: 1, position: 300 + (Date.now() - startedAt) / 1000,
+          duration: 500, hasPosition: true, sampledAt: Date.now()
+        };
+        return {
+          status: mode === 'unknown status' ? -1 : mode === 'playing without detail' ? 1 : 0,
+          position: 0, duration: mode === 'foreign duration' ? 900 : 0, hasPosition: false,
+          sampledAt: mode === 'cached' ? idleSampleAt : Date.now()
+        };
+      });
+      p.manager.startCheckTimer(0.1);
+      await h.advance(45100);
+      mode = 'idle';
+      idleSampleAt = Date.now() + 5000;
+      await h.advance(5000);
+      assert.equal(p.finished(), 0);
+      mode = interruption;
+      await h.advance(5000);
+      assert.equal(p.finished(), 0);
+      if (interruption !== 'cached') {
+        mode = 'idle';
+        await h.advance(5000);
+        assert.equal(p.finished(), 0, 'idle confirmation must restart after interrupted or resumed evidence');
+      }
+      p.manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+test('idle without detail after unconfirmed mismatched progress retains bounded verification', async () => {
+  await withClock(async h => {
+    let ended = false;
+    const p = player(async () => ended
+      ? { status: 0, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() }
+      : { status: 1, position: 300, duration: 500, hasPosition: true, sampledAt: Date.now() });
+    p.manager.startCheckTimer(0.1);
+    await h.advance(100);
+    ended = true;
+    await h.advance(29999);
+    assert.equal(p.finished(), 0);
+    await h.advance(1);
+    assert.equal(p.finished(), 1);
+    assert.equal(h.timers.size, 0);
+  });
+});
+
 for (const lateOutcome of ['success', 'failure']) {
   for (const completion of ['timeout', 'cancel']) {
     test(`issue 514 ${completion} ignores late ${lateOutcome} without clearing an expired handle`, async () => {
