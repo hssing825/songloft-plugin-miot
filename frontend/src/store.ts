@@ -71,6 +71,14 @@ export interface SnackbarState {
   token: number;
 }
 
+export interface OperationLogEntry {
+  id: number;
+  time: string;
+  message: string;
+  success: boolean;
+  ttsText?: string;
+}
+
 export interface ConfirmState {
   open: boolean;
   title: string;
@@ -135,7 +143,7 @@ export const state = reactive({
     confirmText: '确定',
     dangerous: false,
   } as ConfirmState,
-  operationLog: [] as Array<{ time: string; message: string; success: boolean }>,
+  operationLog: [] as OperationLogEntry[],
 });
 
 export function deviceId(device: Device): string {
@@ -195,8 +203,19 @@ export function notify(
   }, duration);
 }
 
-export function addOperation(message: string, success: boolean): void {
-  state.operationLog.unshift({ time: new Date().toLocaleTimeString(), message, success });
+let operationId = 0;
+export function addOperation(message: string, success: boolean, text?: string): void {
+  const ttsText = text?.trim() || undefined;
+  const existingIndex =
+    ttsText === undefined ? -1 : state.operationLog.findIndex((item) => item.ttsText === ttsText);
+  const existing = existingIndex >= 0 ? state.operationLog.splice(existingIndex, 1)[0] : undefined;
+  state.operationLog.unshift({
+    id: existing?.id ?? ++operationId,
+    time: new Date().toLocaleTimeString(),
+    message,
+    success,
+    ttsText,
+  });
   state.operationLog.splice(30);
 }
 
@@ -529,16 +548,28 @@ export async function resumePlaylist(): Promise<void> {
   });
 }
 
-export async function playerCommand(path: string, body: Record<string, unknown> = {}): Promise<void> {
-  if (state.playerBusy) return;
+export async function playerCommand(
+  path: string,
+  body: Record<string, unknown> = {},
+): Promise<boolean> {
+  if (state.playerBusy) return false;
+  const ttsText =
+    path === '/mina/tts' && typeof body.text === 'string' ? body.text.trim() : undefined;
   state.playerBusy = true;
   try {
     await post(path, { ...targetBody(), ...body });
-    requestStatusRefresh();
+    if (ttsText) addOperation('文字播报已发送', true, ttsText);
+    try {
+      requestStatusRefresh();
+    } catch (error) {
+      // 指令已被接受，状态连接异常时继续通过 HTTP 刷新。
+      console.warn('[miot] status refresh request failed', messageOf(error));
+    }
     await refreshPlayerStatus();
+    return true;
   } catch (error) {
     const message = messageOf(error);
-    addOperation(message, false);
+    addOperation(message, false, ttsText);
     notify(message, 'error');
     throw error;
   } finally {
