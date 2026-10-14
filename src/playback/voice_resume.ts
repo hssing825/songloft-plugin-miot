@@ -100,7 +100,7 @@ export class VoiceResumeCoordinator {
         lastStatus = st.status;
         playingWithoutPosition = st.status === 1 && st.hasPosition === false;
         if (st.hasPosition && Number.isFinite(st.position) && st.position >= 0) deviceReportsProgress = true;
-        const stream = pm.matchDeviceStream({ ...st, status: 1 });
+        const stream = pm.matchResumeDeviceStream({ ...st, status: 1 });
         const positionRegressed = st.hasPosition && pm.hasDevicePositionRegressed(st.position, resumePosition);
         // 某些固件在实际播放时连续误报 paused/stopped；进度推进时只校准，不再发 play（#449）。
         if (isDeviceStatusKnown(st.status) && stream !== 'foreign' && st.hasPosition) {

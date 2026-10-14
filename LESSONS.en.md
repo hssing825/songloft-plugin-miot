@@ -10,6 +10,16 @@ Include rule, scope, full owner/repo#number, failure/fix commit SHAs, actual val
 
 ## Entries
 
+### MIOT-005: Duration-mismatch protection must survive recovery timer rebuilds
+
+- Scope: voice, resume verification, hourly recovery, and tail checks when metadata and device stream duration disagree.
+- Evidence: the two logs in the [new songloft-org/songloft#495 report](https://github.com/songloft-org/songloft/issues/495#issuecomment-6167015011) on 2026-10-14 overlap and are not independent incidents. At 19:02:32 the original stream reached 611.5 seconds (metadata 571, device duration 928.318); voice was detected at 19:02:37, the same episode was repushed at `seek=567` at 19:03:08, and the replacement stream reset before advancing at 19:03:38. Recovery queries lack complete logged states, so this does not prove the cause of every audible jump.
+- Reproduction: baseline `fb041740468f41f1f56b1b1f90082a75ab0f98fd` accepts continuous progress of a mismatched stream in deadline checks but classifies it as foreign during recovery using only metadata duration. Nine cross-path cases across three seek/speed combinations all fail against an isolated baseline through repush, incomplete recovery, or subsequent premature advancement. Rebuilding timers also loses progress beyond the metadata ±15-second initial evidence window.
+- Fix: the fix retains the stream-duration signature confirmed by consecutive tail samples, bound to song/seek/speed, for recovery identity. Timer rebuilds may establish a new baseline on that stream but still require new advancing samples. Pause/voice suspension preserve the signature; repush, playlist replacement, stop, external takeover, and cleanup clear it. The signature is not an accurate duration; metadata and server seek guards remain unchanged.
+- Done right: all 893 plugin tests, 64 frontend tests, type checks, QuickJS build, and package validation pass. Parent `CGO_ENABLED=0 make check`, playback/Range, and timer regressions pass. Nine cross-path cases assert continued playback beyond 30 seconds, actual next two URLs, no failure marks/TTS, and no timers after cleanup. Additional checks cover foreign duration, duplicate samples, query failures, and signature lifecycle. Evidence: `/tmp/songloft-495-20261014/`.
+- Not run: physical LX05 playback, original problem audio, firmware version, installed server SHA, and long-running acceptance. Brief device looping before cloud confirmation can remain. Accurate seeking after lost media beyond metadata duration still requires original audio/server-duration verification; the entire issue is not declared resolved.
+- Seen 1× (2026-10-14). Status: lesson; duration differences and physical transition behavior await acceptance.
+
 ### MIOT-004: Disabling context must govern both request content and background generation
 
 - Scope: AI chat history, summaries, preference memory, and configuration migration.

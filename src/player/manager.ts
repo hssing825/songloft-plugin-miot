@@ -376,6 +376,8 @@ export class PlaylistManager {
   private deadlineSampleAtMs: number = -1;
   private deadlineGraceDeadlineMs: number = 0;
   private deadlineTailEvidence: DeadlineTailEvidence | null = null;
+  // 已由连续尾部采样确认的当前流特征；恢复身份使用，不能当作准确时长/结束证据。
+  private confirmedTailStream: { songId: number; seek: number; speed: number; duration: number } | null = null;
   private devicePositionObserved: boolean = false; // 当前流曾收到有效进度，软续播保留、重新推流清空
   private landingVerifyTimer: any = null; // 定时器ID（起播确认探测，见 LANDING_VERIFY_* 常量）
   private landingFailureCount: number = 0; // 连续起播失败次数（#466 熔断），任何一次确认成功即清零
@@ -754,6 +756,7 @@ export class PlaylistManager {
   private async stopInternal(pushToDevice: boolean, isCurrent?: () => boolean): Promise<void> {
     this.stopCheckTimer();
     this.clearVoiceSuspend();
+    this.confirmedTailStream = null;
     this.state = 'stopped';
     this.playStartTimeMs = 0;
     this.pausedPositionSec = 0;
@@ -1082,6 +1085,20 @@ export class PlaylistManager {
     return Math.abs(state.duration - expected) <= tolerance ? 'ours' : 'foreign';
   }
 
+  /** 恢复时允许识别已确认过的失准流；普通切歌仍使用原始时长判据（#495）。 */
+  matchResumeDeviceStream(state: { status: number; duration: number }): 'ours' | 'foreign' | 'unknown' {
+    if (state.status === 1 && this.matchesConfirmedTailStream(state)) return 'ours';
+    return this.matchDeviceStream(state);
+  }
+
+  private matchesConfirmedTailStream(state: { duration: number }): boolean {
+    const known = this.confirmedTailStream;
+    return !!known && known.songId === this.getCurrentSong()?.id &&
+      known.seek === this.streamSeekOffsetSec && known.speed === this.playbackSpeed &&
+      Number.isFinite(state.duration) && state.duration > 0 &&
+      Math.abs(state.duration - known.duration) <= Math.max(1, known.duration * 0.01);
+  }
+
   /**
    * 设备进度是否明显落在续播锚点之前（songloft-org/songloft#516）。
    * position 推进只能证明音频在播放，不能证明它从原位置继续；固件重载同一 URL 后
@@ -1246,7 +1263,7 @@ export class PlaylistManager {
       }
       lastSampleAt = sampleAt;
       this.recordDevicePosition(state);
-      const stream = this.matchDeviceStream({ ...state, status: 1 });
+      const stream = this.matchResumeDeviceStream({ ...state, status: 1 });
       // #449：status 可能连续误报 paused/stopped；当前流的进度推进比状态码更可靠。
       if (isDeviceStatusKnown(state.status) && state.hasPosition && stream !== 'foreign') {
         if (lastPosition >= 0 && state.position - lastPosition + 1e-6 >= 0.1) {
@@ -1320,6 +1337,7 @@ export class PlaylistManager {
   cleanup(): void {
     this.stopCheckTimer();
     this.devicePositionObserved = false;
+    this.confirmedTailStream = null;
     this.stopResumePoll();
     this.clearPlaybackFailures();
   }
@@ -1378,6 +1396,7 @@ export class PlaylistManager {
     this.endExternalPlayback();
     this.stopCheckTimer();
     this.devicePositionObserved = false;
+    this.confirmedTailStream = null;
     this.stopResumePoll();
     this.clearVoiceSuspend();
     this.state = 'idle';
@@ -1535,6 +1554,7 @@ export class PlaylistManager {
    */
   initWithSongs(songs: Song[], startIndex: number, playMode: PlayMode, playlistId: number): void {
     this.devicePositionObserved = false;
+    this.confirmedTailStream = null;
     this.deadlineTailEvidence = null;
     this.songs = songs;
     this.totalSongs = songs.length;
@@ -1551,6 +1571,7 @@ export class PlaylistManager {
    */
   initWithTempArtist(songs: Song[], artistName: string, playMode: PlayMode): void {
     this.devicePositionObserved = false;
+    this.confirmedTailStream = null;
     this.deadlineTailEvidence = null;
     this.songs = songs;
     this.totalSongs = songs.length;
@@ -1719,6 +1740,7 @@ export class PlaylistManager {
 
     this.stopCheckTimer(opts?.isCurrent);
     this.devicePositionObserved = false;
+    this.confirmedTailStream = null;
     this.playbackConfirmed = false;
     this.streamStartedAtMs = 0;
     // 恢复任务的回调只负责任务身份；本地版本负责捕获同曲重播、暂停等操作。
@@ -2411,9 +2433,9 @@ export class PlaylistManager {
     }
     const position = st.position * this.playbackSpeed + this.streamSeekOffsetSec;
     if (!previous) {
-      // 初始证据只在元数据尾部附近建立；曲中外来媒体不靠持续推进接管此分支。
+      // 新流只在元数据尾部附近建证据；恢复时可在已确认过的流上重建，仍需下一份推进。
       if (st.status === 1 && position >= song.duration - TAIL_PROBE_WINDOW_SEC &&
-        position <= song.duration + TAIL_PROBE_WINDOW_SEC) {
+        (position <= song.duration + TAIL_PROBE_WINDOW_SEC || this.matchesConfirmedTailStream(st))) {
         this.deadlineTailEvidence = {
           position: st.position, duration: st.duration, sampledAt: sampleAt,
           confirmed: false, interrupted: false, stopHits: 0,
@@ -2452,6 +2474,9 @@ export class PlaylistManager {
       previous.sampledAt = sampleAt;
       previous.confirmed = true;
       previous.stopHits = 0;
+      this.confirmedTailStream = {
+        songId: song.id, seek: this.streamSeekOffsetSec, speed: this.playbackSpeed, duration: st.duration,
+      };
       return { advancing: true, ended: false };
     }
     if (previous.confirmed && Math.abs(advance) < TAIL_STALL_ADVANCE_MIN_SEC) {
@@ -3019,7 +3044,7 @@ export class PlaylistManager {
       } else if (sampleAt > lastSampleAt && sampleAt >= task.startedAt) {
         lastSampleAt = sampleAt;
         this.recordDevicePosition(st);
-        const stream = this.matchDeviceStream({ ...st, status: 1 });
+        const stream = this.matchResumeDeviceStream({ ...st, status: 1 });
         const positionMatches = stream === 'ours' || (stream === 'unknown' &&
           st.position * this.playbackSpeed + this.streamSeekOffsetSec >= task.position - 5 * this.playbackSpeed);
         if (st.hasPosition && Number.isFinite(st.position) && st.position >= 0 && positionMatches) {

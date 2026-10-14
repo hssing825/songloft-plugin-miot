@@ -256,7 +256,7 @@ test('issue 495: successive episodes ending without detail advance promptly and 
   });
 });
 
-for (const operation of ['pause', 'voice suspension', 'same-song restart', 'next', 'new playlist', 'new artist playlist', 'external takeover', 'cleanup']) {
+for (const operation of ['pause', 'voice suspension', 'same-song restart', 'next', 'new playlist', 'new artist playlist', 'external takeover', 'stop', 'cleanup']) {
   test(`issue 495: ${operation} clears confirmed tail evidence and ignores an old deadline response`, async () => {
     await withClock(async h => {
       const startedAt = Date.now();
@@ -286,8 +286,11 @@ for (const operation of ['pause', 'voice suspension', 'same-song restart', 'next
       else if (operation === 'new playlist') manager.initWithSongs(songs, 0, 'order', 2);
       else if (operation === 'new artist playlist') manager.initWithTempArtist(songs, 'artist');
       else if (operation === 'external takeover') await manager.beginExternalPlayback(() => { });
+      else if (operation === 'stop') await manager.stop(false);
       else manager.cleanup();
       assert.equal(manager.deadlineTailEvidence, null);
+      assert.equal(manager.matchResumeDeviceStream({ status: 1, duration: 500 }),
+        ['pause', 'voice suspension'].includes(operation) ? 'ours' : 'foreign');
       const timers = [...h.timers.keys()];
       const pushCount = pushes.length;
       slow.resolve({ status: 1, position: 0, duration: 500, hasPosition: true, sampledAt: Date.now() });
@@ -297,6 +300,141 @@ for (const operation of ['pause', 'voice suspension', 'same-song restart', 'next
       assert.equal(pushes.length, pushCount);
       assert.deepEqual([...h.timers.keys()], timers.filter(id => !queryTimers.has(id)));
       manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+// 2026-10-14 log: metadata=571, device duration=928.318, position=611.5 before voice.
+for (const [seek, speed] of [[0, 1], [100, 0.5], [80, 2]]) {
+  for (const recovery of ['voice', 'resume command', 'hourly']) {
+    test(`issue 495: ${recovery} keeps a confirmed mismatched tail stream seek=${seek} speed=${speed}`, async () => {
+      await withClock(async h => {
+        let baseAt = Date.now();
+        let interrupted = false;
+        let afterRecovery = false;
+        const metadata = 571;
+        const streamDuration = (928.318 - seek) / speed;
+        let startPosition = (570.974 - seek) / speed;
+        const s = player({
+          config: { hourly_chime_resume_enabled: true, smart_resume_timeout: 30 },
+          initialSongs: [{ ...songs[0], duration: metadata }, ...songs.slice(1)],
+          service: {
+            resumePlay: async () => true,
+            getPlayState: async () => {
+              const elapsed = (Date.now() - baseAt) / 1000;
+              if (s.manager.currentIndex > 0) return {
+                status: 1, position: 0, duration: 300, hasPosition: true, sampledAt: Date.now(),
+              };
+              if (interrupted && elapsed < 1) return {
+                status: 1, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now(),
+              };
+              return {
+                status: 1, position: afterRecovery && elapsed >= 70 ? 2.707 : startPosition + elapsed,
+                duration: streamDuration, hasPosition: true, sampledAt: Date.now(),
+              };
+            },
+          },
+        });
+        assert.equal(await s.manager.playCurrent({ seekSeconds: seek, speed }), true);
+        s.manager.playStartTimeMs = Date.now() - 570.974 / speed * 1000;
+        s.manager.startCheckTimer(0.1);
+        await h.advance(41000);
+        assert.equal(s.manager.deadlineTailEvidence.confirmed, true);
+        assert.equal(s.pushes.length, 1);
+        if (recovery === 'voice') {
+          interrupted = true;
+          startPosition += (Date.now() - baseAt) / 1000;
+          baseAt = Date.now();
+          const engine = resumeEngine(s.manager);
+          s.manager.suspendForVoiceInteraction();
+          engine.scheduleSmartResume(s.manager, 'account', 'speaker');
+          await h.advance(31000);
+          engine.setEnabled(false);
+        } else if (recovery === 'resume command') {
+          assert.equal(await s.manager.resumePlayback(), true);
+          await h.advance(31000);
+        } else {
+          // Use the real hourly recovery entry at the next hour, with a new near-tail baseline.
+          const hour = new Date(Date.now());
+          hour.setHours(hour.getHours() + 1, 0, 10, 0);
+          s.manager.stopCheckTimer();
+          await h.advance(hour.getTime() - Date.now());
+          baseAt = Date.now();
+          s.manager.startCheckTimer(0.1);
+          await h.advance(5100);
+          assert.equal(s.manager.deadlineTailEvidence.confirmed, true);
+          s.manager.playbackConfirmed = true;
+          assert.equal(await s.manager.tryHourlyResume(metadata - 20, () => true), true);
+          await flush();
+          await h.advance(31000);
+        }
+        assert.equal(s.pushes.length, 1, 'advancing original audio must not be repushed at a truncated metadata seek');
+        assert.equal(s.manager.isVoiceSuspended(), false);
+        assert.equal(s.manager.isHourlyResumePending(), false);
+        assert.equal(s.manager.currentIndex, 0, 'timer rebuild beyond metadata must still protect continuous playback');
+        // Keep playing for more than the 30-second grace, then verify real next URLs twice.
+        afterRecovery = true;
+        startPosition += (Date.now() - baseAt) / 1000;
+        baseAt = Date.now();
+        await h.advance(69999);
+        assert.equal(s.pushes.length, 1);
+        await h.advance(10001);
+        assert.equal(s.pushes.length, 2, h.logs.slice(-12).join('\n'));
+        assert.match(s.pushes[1], /\/songs\/17\/play/);
+        assert.equal(s.manager.unplayableSongs.size, 0);
+        assert.deepEqual(s.tts, []);
+        assert.ok(s.manager.checkTimer !== null);
+        s.manager.minaService.getPlayState = async () => ({
+          status: 1, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now(),
+        });
+        await h.advance(300000 / speed);
+        assert.equal(s.pushes.length, 3);
+        assert.match(s.pushes[2], /\/songs\/18\/play/);
+        s.manager.cleanup();
+        assert.equal(h.timers.size, 0);
+      });
+    });
+  }
+}
+
+for (const evidence of ['different stream', 'duplicate sample', 'query failure']) {
+  test(`issue 495: remembered tail identity does not authorize recovery from ${evidence}`, async () => {
+    await withClock(async h => {
+      const startedAt = Date.now();
+      const s = player({
+        service: { getPlayState: async () => ({
+          status: 1, position: 300 + (Date.now() - startedAt) / 1000,
+          duration: 500, hasPosition: true, sampledAt: Date.now(),
+        }) },
+      });
+      await s.manager.playCurrent();
+      s.manager.playStartTimeMs = Date.now() - 300000;
+      s.manager.startCheckTimer(0.1);
+      await h.advance(5100);
+      assert.equal(s.manager.deadlineTailEvidence.confirmed, true);
+      const sampleAt = Date.now();
+      s.manager.minaService.getPlayState = async () => ({
+        status: evidence === 'query failure' ? -1 : 1,
+        position: 305 + (Date.now() - sampleAt) / 1000,
+        duration: evidence === 'different stream' ? 800 : 500,
+        hasPosition: true,
+        sampledAt: evidence === 'duplicate sample' ? sampleAt : Date.now(),
+      });
+      const engine = resumeEngine(s.manager);
+      s.manager.suspendForVoiceInteraction();
+      engine.scheduleSmartResume(s.manager, 'account', 'speaker');
+      await h.advance(29999);
+      assert.equal(s.manager.isVoiceSuspended(), true, 'only two fresh advancing samples of the same stream prove auto-resume');
+      assert.equal(s.pushes.length, 1);
+      await h.advance(1);
+      assert.equal(s.pushes.length, evidence === 'different stream' ? 2 : 1);
+      if (evidence === 'different stream') assert.match(s.pushes[1], /seek=296/);
+      assert.equal(s.manager.currentIndex, 0);
+      assert.equal(s.manager.unplayableSongs.size, 0);
+      assert.deepEqual(s.tts, []);
+      engine.setEnabled(false);
+      s.manager.cleanup();
       assert.equal(h.timers.size, 0);
     });
   });
