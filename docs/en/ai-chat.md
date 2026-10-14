@@ -14,6 +14,10 @@ The default Chinese prefixes are “请问” and “问一下”. A successful 
 
 Chat uses complete model responses and native speaker TTS. Answers are split at sentence boundaries into segments of up to 200 characters, with at most 1,200 characters spoken. Full answers remain in history. Model reasoning content is not spoken.
 
+Waiting feedback is enabled by default. After suspending music and interrupting the native answer, only the requesting speaker says “收到，正在思考” (received, thinking). The hint runs alongside the model request, with a three-second startup guard before the answer is spoken. Hint failures are logged without failing the model answer. Disable it in AI settings; text-only tests send no hint. Known hybrid thinking models on official DashScope endpoints share the command analyzer's non-thinking parameter. Other providers and thinking-only models retain their parameters. Network, model, and context still affect response time.
+
+Once a page question is accepted, the page confirms submission and shows processing progress. History-refresh failures appear as separate warnings rather than submission failures; actual model and speech failures retain their task errors.
+
 Chat suspends automatic track advancement and captures the original position and playback revision. Group playback pauses all members, speaks only on the requesting device, and then restores the shared queue at its common position. Offline members generate individual warnings. Previously paused or stopped music is not automatically started. A text-only test replacing spoken chat first stops the old answer and follows that task's music-recovery setting.
 
 TTS acknowledgement only confirms command acceptance. Each segment has a startup protection interval and requires two fresh idle samples with different timestamps to confirm completion. Unknown state or a 90-second segment deadline stops further segments and leaves music paused for manual recovery. Firmware-dependent speech status still requires real-device validation.

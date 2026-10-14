@@ -1,6 +1,7 @@
 import type { AIConfig } from '../types';
 import { aiChatCompletionsUrl } from '../utils/ai_url';
 import { requestAI } from '../utils/ai_request';
+import { canDisableDashScopeThinking } from '../utils/ai_thinking';
 export interface AIMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
@@ -70,10 +71,12 @@ export class AIClient {
       }
       queue.push({
         scope, current, resolve: v => resolve(v as string), reject, run: async () => {
-          const value = await requestAI(aiChatCompletionsUrl(config.api_url), {
+          const endpoint = aiChatCompletionsUrl(config.api_url);
+          const thinkingDisabled = canDisableDashScopeThinking(endpoint, config.model);
+          const value = await requestAI(endpoint, {
             method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.api_key}` },
-            body: JSON.stringify({ model: config.model, stream: false, messages, max_tokens: kind === 'chat' ? 2048 : 1200 }),
-          }, config.timeout, { kind, model: config.model }, async (response) => {
+            body: JSON.stringify({ model: config.model, stream: false, messages, max_tokens: kind === 'chat' ? 2048 : 1200, ...(thinkingDisabled ? { enable_thinking: false } : {}) }),
+          }, config.timeout, { kind, model: config.model, thinkingDisabled }, async (response) => {
             if (!response.ok)
               throw new Error(`AI API error: ${response.status}`);
             const data = await response.json();

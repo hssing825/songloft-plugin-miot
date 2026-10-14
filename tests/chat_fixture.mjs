@@ -4,7 +4,7 @@ export const { DEFAULT_CHAT_CONFIG, validateChatConfig, chatConnection, chatScop
 export const { AIChatService } = load('../src/chat/service.ts');
 export const { PlaybackCoordinator } = load('../src/playback/coordinator.ts');
 export const { ChatMemoryService } = load('../src/chat/memory.ts');
-export const configOf = (updates = {}) => ({ ...DEFAULT_CHAT_CONFIG, enabled: true, memory_enabled: false, connection: 'independent', api_url: 'https://example.test/v1', api_key: 'test-only', model: 'model', ...updates });
+export const configOf = (updates = {}) => ({ ...DEFAULT_CHAT_CONFIG, enabled: true, waiting_feedback: false, memory_enabled: false, connection: 'independent', api_url: 'https://example.test/v1', api_key: 'test-only', model: 'model', ...updates });
 export const turnOf = (id, updates = {}) => ({ id, user: `问题${id}`, assistant: `答案${id}`, phase: 'completed', created_at: Date.now(), ...updates });
 export function storageOf(t) {
   const previous = globalThis.songloft, values = new Map(), logs = [];

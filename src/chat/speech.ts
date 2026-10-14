@@ -21,6 +21,22 @@ export function speechSegments(answer: string): string[] {
 }
 export class SpeechService {
   constructor(private devices: MinaService) { }
+  async acknowledge(token: InteractionToken, current = token.isCurrent): Promise<void> {
+    if (!current())
+      return;
+    try {
+      const accepted = await this.devices.textToSpeech(token.account, token.device, '收到，正在思考。', current);
+      if (accepted && current()) {
+        // 短提示仅保留启动保护；最终回答仍须新采样确认结束才能恢复音乐。
+        await new Promise<void>(resolve => setTimeout(resolve, 3000));
+      }
+      else if (current())
+        songloft.log.warn(`[AIChat] task=${token.id} waiting_feedback_failed`);
+    }
+    catch (error) {
+      songloft.log.warn(`[AIChat] task=${token.id} waiting_feedback_failed=${String(error)}`);
+    }
+  }
   async stop(token: InteractionToken): Promise<void> {
     const result = await this.devices.stopForInteraction(token.account, token.device, token.isCurrent);
     if (token.isCurrent() && result !== 'stopped')

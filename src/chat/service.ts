@@ -122,7 +122,16 @@ export class AIChatService {
         return;
       this.publish(task, 'generating');
       const connection = chatConnection(task.config, await this.config.getAIConfig());
-      task.turn.assistant = await this.client.request(connection, this.memory.messages(snapshot, task.config, task.turn.user), 'chat', current, task.scope);
+      if (!current())
+        return;
+      // 模型与短提示并行；两者都收尾后再播报，失败提示也不与等待提示重叠。
+      const [answer] = await Promise.allSettled([
+        this.client.request(connection, this.memory.messages(snapshot, task.config, task.turn.user), 'chat', current, task.scope),
+        task.speak && task.config.waiting_feedback ? this.speech.acknowledge(task.token, current) : Promise.resolve(),
+      ]);
+      if (answer.status === 'rejected')
+        throw answer.reason;
+      task.turn.assistant = answer.value;
       if (!current())
         return;
       if (task.speak) {

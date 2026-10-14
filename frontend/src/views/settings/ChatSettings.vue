@@ -13,7 +13,7 @@ import SlSelect from '../../ui/SlSelect.vue';
 
 const config = reactive<ChatConfig>({ ...DEFAULT_CHAT_CONFIG, trigger_words: [...DEFAULT_CHAT_CONFIG.trigger_words] });
 const triggers = ref(config.trigger_words.join('、'));
-const loaded = ref(false), busy = ref(false), error = ref(''), question = ref(''), speak = ref(true);
+const loaded = ref(false), busy = ref(false), error = ref(''), refreshError = ref(''), question = ref(''), speak = ref(true);
 const history = ref<ChatTurn[]>([]), memories = ref<ChatMemory[]>([]), summary = ref(''), offset = ref(0), total = ref(0);
 const memoryDrafts = reactive<Record<string, string>>({});
 let refreshVersion = 0;
@@ -50,7 +50,22 @@ async function save() {
 }
 async function submit() {
   await post('/chat/messages', { ...target.value, text: question.value, speak: speak.value });
-  question.value = ''; await refresh();
+  question.value = '';
+  if (!alive) return;
+  notify('问题已提交，请查看当前状态和聊天历史', 'success');
+  await refreshSafely();
+}
+async function refreshSafely() {
+  const identity = targetQuery.value;
+  const pending = refresh();
+  const version = refreshVersion;
+  const current = () => alive && version === refreshVersion && identity === targetQuery.value;
+  try { await pending; if (current()) refreshError.value = ''; }
+  catch (e) {
+    if (!current()) return;
+    refreshError.value = `历史刷新失败：${messageOf(e)}；已提交的问题会继续处理。`;
+    notify(refreshError.value, 'warning');
+  }
 }
 async function clear(range: 'history' | 'memory' | 'all') {
   const identity = targetQuery.value;
@@ -64,8 +79,8 @@ async function removeTurn(id: string) {
   if (!alive || identity !== targetQuery.value) return;
   await del(`/chat/history/${encodeURIComponent(id)}${targetQuery.value}`); await refresh();
 }
-watch(targetQuery, () => { history.value = []; memories.value = []; summary.value = ''; total.value = 0; for (const id of Object.keys(memoryDrafts)) delete memoryDrafts[id]; offset.value = 0; void refresh().catch(e => { error.value = messageOf(e); }); });
-watch(() => [state.chatStatus?.task_id, state.chatStatus?.phase, state.chatStatus?.memory_revision], () => { void refresh().catch(e => { error.value = messageOf(e); }); });
+watch(targetQuery, () => { history.value = []; memories.value = []; summary.value = ''; total.value = 0; refreshError.value = ''; for (const id of Object.keys(memoryDrafts)) delete memoryDrafts[id]; offset.value = 0; void refreshSafely(); });
+watch(() => [state.chatStatus?.task_id, state.chatStatus?.phase, state.chatStatus?.memory_revision], () => { void refreshSafely(); });
 onMounted(() => { void action(async () => { Object.assign(config, await get<ChatConfig>('/chat/config')); triggers.value = config.trigger_words.join('、'); loaded.value = true; await refresh(); }); });
 let alive = true;
 onUnmounted(() => { alive = false; refreshVersion++; });
@@ -82,6 +97,7 @@ const safeAction = (run: () => Promise<void>) => { if (alive) void action(run); 
       <label class="chat-field">触发词（用顿号或逗号分隔）<SlInput v-model="triggers" aria-label="问答触发词" /></label>
       <SettingRow title="音乐口令未命中后交给 AI"><SlSwitch v-model="config.fallback_enabled" aria-label="兜底问答" /></SettingRow>
       <SettingRow title="每轮回答后恢复原音乐"><SlSwitch v-model="config.resume_music" aria-label="回答后恢复音乐" /></SettingRow>
+      <SettingRow title="等待时播报提示" subtitle="提问后说“收到，正在思考”，模型请求同时开始。"><SlSwitch v-model="config.waiting_feedback" aria-label="等待时播报提示" /></SettingRow>
       <label class="chat-field">追问窗口（秒，0 关闭）<SlInput :model-value="String(config.followup_seconds)" type="number" aria-label="追问窗口" @update:model-value="config.followup_seconds = Number($event)" /></label>
       <p>追问仍需唤醒音箱。分组播放时全组暂停，仅提问设备回答；播报结束无法确认时保持暂停。DLNA 投放中请先停止投放。</p>
       </div>
@@ -106,6 +122,8 @@ const safeAction = (run: () => Promise<void>) => { if (alive) void action(run); 
       <div class="form-body">
       <SlSelect :disabled="busy || !loaded" :model-value="deviceSelection" :options="deviceOptions" aria-label="对话设备" @update:model-value="safeAction(async () => { const [account, device] = JSON.parse($event); await selectDevice(account, device); })" />
       <p>当前状态：<strong>{{ phase }}</strong></p>
+      <p v-if="active" role="status">问题处理中，请等待；可随时停止回答。</p>
+      <p v-if="refreshError" role="status">{{ refreshError }}</p>
       <p v-if="state.chatStatus?.error" role="alert">{{ state.chatStatus.error }}</p>
       <label class="chat-field">问题<textarea v-model="question" class="sl-input chat-textarea" aria-label="对话问题" maxlength="2000"></textarea></label>
       <SettingRow title="在音箱上播报"><SlSwitch v-model="speak" aria-label="播报回答" /></SettingRow>

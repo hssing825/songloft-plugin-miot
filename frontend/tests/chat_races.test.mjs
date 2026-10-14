@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 import ts from 'typescript';
-const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
+const deferred = () => { let resolve, reject; const promise = new Promise((r, e) => { resolve = r; reject = e; }); return { promise, resolve, reject }; };
 const flush = async () => {
   for (let i = 0; i < 30; i++)
     await Promise.resolve();
@@ -160,7 +160,7 @@ function pageOf(options = {}) {
     put: async (path, value) => { calls.push([path, structuredClone(value)]); return value; }, post: async (...args) => calls.push(args), del: async (path) => calls.push(path),
     notify: (...args) => notifications.push(args), confirmAction: options.confirm || (async () => ({ confirmed: true })),
   };
-  const page = script('views/settings/ChatSettings.vue', env, 'action, safeAction, refresh, clear, removeTurn, save, submit, config, triggers, history, memories, memoryDrafts, busy, error, loaded, question, speak');
+  const page = script('views/settings/ChatSettings.vue', env, 'action, safeAction, refresh, refreshSafely, clear, removeTurn, save, submit, config, triggers, history, memories, memoryDrafts, busy, error, refreshError, loaded, question, speak');
   return { ...page, state, calls, notifications, watches, unmount: () => unmount() };
 }
 test('save sends normalized triggers and action blocks duplicate submissions, reporting errors', async () => {
@@ -199,6 +199,28 @@ test('text submission uses selected device and speak flag, then clears the quest
   await h.submit();
   assert.deepEqual(h.calls[0], ['/chat/messages', { account_id: 'a', device_id: 'd', text: '测试问题', speak: false }]);
   assert.equal(h.question.value, '');
+});
+test('accepted question remains successful when history refresh fails', async () => {
+  const h = pageOf({ get: async () => { throw new Error('历史读取失败'); } });
+  h.question.value = '测试问题';
+  await h.action(h.submit);
+  assert.equal(h.question.value, '');
+  assert.equal(h.error.value, '');
+  assert.ok(h.notifications.some(n => n[1] === 'success' && n[0].includes('已提交')));
+  assert.ok(h.notifications.some(n => n[1] === 'warning' && n[0].includes('历史读取失败')));
+  assert.ok(!h.notifications.some(n => n[1] === 'error'));
+});
+test('stale history errors cannot overwrite a newer successful refresh', async () => {
+  const requests = [];
+  const h = pageOf({ get: () => { const wait = deferred(); requests.push(wait); return wait.promise; } });
+  const old = h.refreshSafely(), latest = h.refreshSafely();
+  requests[2].resolve({ history: [], total: 0, summary: '' });
+  requests[3].resolve({ memories: [] });
+  await latest;
+  requests[0].reject(new Error('旧请求失败')); requests[1].resolve({ memories: [] });
+  await old;
+  assert.equal(h.refreshError.value, '');
+  assert.deepEqual(h.notifications, []);
 });
 for (const operation of ['clear', 'delete']) {
   test(`${operation} confirmation cannot act on a newly selected device`, async () => {

@@ -10,6 +10,14 @@ Include rule, scope, full owner/repo#number, failure/fix commit SHAs, actual val
 
 ## Entries
 
+### MIOT-002: Report asynchronous submission and subsequent page refresh separately
+
+- Scope: AI chat tests and other page actions that refresh history after submission.
+- Feedback: [songloft-org/songloft-plugin-miot#119](https://github.com/songloft-org/songloft-plugin-miot/issues/119#issuecomment-6158362927), 2026-10-14: the page reported failure while the speaker read the answer. No specific error was supplied, so the reported root cause remains unconfirmed.
+- Reproduction and fix: the page at baseline `adace3586ed187555da5831e9d3926a0521403bb` handled `POST /chat/messages` and subsequent history refresh through one error path. With successful submission and a failed history read, the new test failed on the old implementation's error feedback. The current uncommitted worktree separates history warnings from submission/task errors and prevents stale refresh warnings from affecting a new device or newer refresh.
+- Done right: frontend tests cover successful feedback for accepted questions, separate history warnings, and stale-error rejection. Docker Chrome used a 202 acceptance and simulated history 500 to verify the cleared question, absence of submission errors, and eventual answer in history; a test-service readback confirmed completion. The browser fixture is independent of the speaker cloud and does not establish the reporter's exact failure path or audible device speech.
+- Seen 1× (2026-10-14). Status: lesson.
+
 ### MIOT-001: Distinguish successful idle samples from query failures when tail progress disappears
 
 - Scope: automatic transitions on devices whose stream duration differs from song metadata.

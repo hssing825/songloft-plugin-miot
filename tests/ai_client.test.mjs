@@ -6,6 +6,22 @@ const { AIClient } = load('../src/ai/client.ts');
 const config = { enabled: true, api_url: 'https://api.example.test/v1', api_key: 'private-test-key', model: 'model', timeout: 1 };
 const messages = text => [{ role: 'user', content: text }];
 const answer = text => Response.json({ choices: [{ message: { content: text } }] });
+for (const [api_url, model, disabled] of [
+  ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'qwen3.7-flash', true],
+  ['https://api.example.test/v1', 'qwen3.7-flash', false],
+  ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'qwen3-235b-a22b-thinking-2507', false],
+]) {
+  test(`chat thinking policy: ${api_url} ${model}`, async t => {
+    storageOf(t);
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+      const body = JSON.parse(options.body);
+      assert.equal(Object.hasOwn(body, 'enable_thinking'), disabled);
+      if (disabled) assert.equal(body.enable_thinking, false);
+      return answer('回答');
+    });
+    assert.equal(await new AIClient().request({ ...config, api_url, model }, messages('问'), 'chat'), '回答');
+  });
+}
 for (const status of [401, 403, 429, 500]) {
   test(`chat HTTP ${status} rejects and releases its queue slot`, async (t) => {
     storageOf(t);
