@@ -18,7 +18,7 @@ function routesOf(t, options = {}) {
   };
   return { ...h, request };
 }
-for (const [field, min, max] of [['timeout', 1, 30], ['followup_seconds', 0, 300], ['context_turns', 1, 24], ['history_limit', 12, 500], ['history_days', 1, 30]]) {
+for (const [field, min, max] of [['timeout', 1, 30], ['followup_seconds', 0, 300], ['context_turns', 0, 24], ['history_limit', 12, 500], ['history_days', 1, 30]]) {
   test(`config ${field}: accepts bounds and rejects wrong types/fraction/out-of-range`, () => {
     for (const value of [min, max])
       assert.equal(validateChatConfig({ [field]: value })[field], value);

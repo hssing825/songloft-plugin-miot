@@ -158,7 +158,7 @@ async function onInit(): Promise<void> {
   registerConversationHandlers(router, conversationMonitor, configManager);
   registerScheduleHandlers(router, scheduler, configManager);
   registerVoiceCommandHandlers(router, configManager, accountManager, voiceEngine, voiceDispatcher);
-  registerChatHandlers(router, configManager, aiChat);
+  registerChatHandlers(router, configManager, aiChat, config => conversationMonitor.setChatEnabled(config.enabled));
   registerIndexingHandlers(router, indexingManager);
   registerMemoryHandlers(router, memoryService, configManager);
   registerLyricHandlers(router);

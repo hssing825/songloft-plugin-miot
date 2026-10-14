@@ -4,7 +4,7 @@ export function aiTimeoutMs(seconds: number): number {
   return Math.round(Math.max(1, Math.min(30, value)) * 1000);
 }
 
-interface AIRequestOptions {
+export interface AIRequestOptions {
   method: string;
   headers: Record<string, string>;
   body?: string;
@@ -25,7 +25,8 @@ export async function requestAI<T>(
   options: AIRequestOptions,
   timeoutSeconds: number,
   context: AIRequestContext,
-  readResponse: (response: Response, requestId: string) => Promise<T>,
+  readResponse: (response: Pick<Response, 'ok' | 'status' | 'json' | 'text'>, requestId: string) => Promise<T>,
+  transport?: (options: AIRequestOptions) => Promise<Pick<Response, 'ok' | 'status' | 'json' | 'text'>>,
 ): Promise<T> {
   const requestId = String(++requestSequence);
   const timeoutMs = aiTimeoutMs(timeoutSeconds);
@@ -51,10 +52,11 @@ export async function requestAI<T>(
       timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
     });
     const request = (async () => {
-      const response = await fetch(url, {
+      const init = {
         ...options,
         headers: { ...options.headers, 'X-Fetch-Timeout-Ms': String(timeoutMs) },
-      });
+      };
+      const response = await (transport ? transport(init) : fetch(url, init));
       // 超时后的迟到响应不再解析或记录为成功。
       if (finished) throw new Error(timeoutMessage);
       status = response.status;

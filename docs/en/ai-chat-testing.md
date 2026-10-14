@@ -28,6 +28,8 @@ Test files are in the plugin repository's `tests/` and `frontend/tests/` directo
 | UI asynchronous behavior | HTTP cannot overwrite newer WS state, HTTP fallback on connection failure, disconnect/open-deadline retries, duplicate closes do not duplicate retries, device switching, out-of-order refresh, edit drafts preserved, duplicate submissions blocked, retry after error, confirmation cannot delete newly selected device data, no updates after unmount | `frontend/tests/chat_races.test.mjs` |
 | Submission and history refresh | Accepted questions retain successful submission feedback when history reads fail; refresh warnings do not replace task errors, and stale warnings cannot affect newer refreshes | `frontend/tests/chat_races.test.mjs` |
 
+Additional regressions: `chat_context_controls.test.mjs` covers legacy migration, zero history, independent summary/preferences, and disabled background requests. `ai_sse.test.mjs` covers byte-split UTF-8, SSE framing, partial output, errors/interruption, JSON compatibility, and upstream cancellation. `chat_stream_flow.test.mjs` covers model/takeover overlap, DLNA rejection, no partial TTS, and old cleanup not cancelling a replacement stream. Frontend `chat_races.test.mjs` covers restoring the turn count, unsaved-state feedback, and a single config save. Host `api_bridge_http_stream_test.go` covers incremental reads, permissions/limits, EOF, deadlines, cancellation, unload, and actual QuickJS calls. Incremental text display is not proof of speaker audio.
+
 ## Running and Evaluating Tests
 
 From the plugin directory:

@@ -19,7 +19,7 @@ import type {
   PlaylistProgress,
   PlaylistProgressStore,
 } from '../types';
-import { DEFAULT_CHAT_CONFIG, validateChatConfig } from '../chat/types';
+import { DEFAULT_CHAT_CONFIG, readChatConfig, validateChatConfig } from '../chat/types';
 import type { ChatConfig } from '../chat/types';
 
 import { DEFAULT_MEMORY_MAX_RECORDS, normalizeMemoryMaxRecords } from '../memory/types';
@@ -146,14 +146,14 @@ export class ConfigManager {
     await this.chatConfigWrite.catch(() => { });
     const raw = await songloft.storage.get('chat_config:v1');
     if (!raw) return validateChatConfig({});
-    try { return validateChatConfig(JSON.parse(raw as string)); }
+    try { return readChatConfig(JSON.parse(raw as string)); }
     catch { throw new Error('AI 对话配置损坏，原配置已保留'); }
   }
 
   saveChatConfig(updates: Partial<ChatConfig>): Promise<ChatConfig> {
     const pending = this.chatConfigWrite.catch(() => { }).then(async () => {
       const raw = await songloft.storage.get('chat_config:v1');
-      const current = raw ? validateChatConfig(JSON.parse(raw as string)) : DEFAULT_CHAT_CONFIG;
+      const current = raw ? readChatConfig(JSON.parse(raw as string)) : DEFAULT_CHAT_CONFIG;
       const next = validateChatConfig(updates, current);
       await songloft.storage.set('chat_config:v1', JSON.stringify(next));
       return next;

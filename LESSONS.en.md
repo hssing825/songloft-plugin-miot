@@ -10,6 +10,14 @@ Include rule, scope, full owner/repo#number, failure/fix commit SHAs, actual val
 
 ## Entries
 
+### MIOT-004: Disabling context must govern both request content and background generation
+
+- Scope: AI chat history, summaries, preference memory, and configuration migration.
+- Evidence: on 2026-10-14, [songloft-org/songloft-plugin-miot#119](https://github.com/songloft-org/songloft-plugin-miot/issues/119#issuecomment-6162510329) asked whether disabling memory still sends history. At baseline `db4bd0c2fc5ad55a7a557743fe691480f300ce28`, the memory switch does not govern history/summaries, and background summaries have no independent switch. Reducing recent turns does not bound the older summary.
+- Rule: Define local retention, conversation context, and preferences independently. With history off, neither inject nor generate summaries; with preferences off, neither extract nor inject memories. Keep inexpensive new defaults separate from legacy migration to avoid silently changing existing behavior.
+- Done right: five context regressions in this change fail for the expected behavior on an isolated old implementation and pass after the changes. Actual Songloft/QuickJS, the built plugin, and Docker Chrome verify that both context sources off sends only the role prompt/current question, and SSE partial text displays and survives cancellation. Evidence: `/tmp/songloft-119-sse/`. Mock models and fictitious devices do not establish native TTS audio.
+- Seen 1× (2026-10-14). Status: lesson; semantics in [AI chat](docs/en/ai-chat.md).
+
 ### MIOT-003: A recovery task can outlive the timer that started it
 
 - Scope: voice recovery tasks, hourly recovery, and timer compatibility with older hosts.

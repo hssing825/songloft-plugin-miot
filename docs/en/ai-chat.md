@@ -12,11 +12,13 @@ The default Chinese prefixes are “请问” and “问一下”. A successful 
 
 ## Speech and Music Recovery
 
-Chat uses complete model responses and native speaker TTS. Answers are split at sentence boundaries into segments of up to 200 characters, with at most 1,200 characters spoken. Full answers remain in history. Model reasoning content is not spoken.
+Model SSE incrementally updates the current answer on the page, with status pushes throttled to at most once per 200 ms. Native speaker TTS always waits for the complete model answer. Answers are split at sentence boundaries into segments of up to 200 characters, with at most 1,200 characters spoken. Full answers remain in history. Model reasoning content is not spoken.
 
 Waiting feedback is enabled by default. After suspending music and interrupting the native answer, only the requesting speaker says “收到，正在思考” (received, thinking). The hint runs alongside the model request, with a three-second startup guard before the answer is spoken. Hint failures are logged without failing the model answer. Disable it in AI settings; text-only tests send no hint. Known hybrid thinking models on official DashScope endpoints share the command analyzer's non-thinking parameter. Other providers and thinking-only models retain their parameters. Network, model, and context still affect response time.
 
 Once a page question is accepted, the page confirms submission and shows processing progress. History-refresh failures appear as separate warnings rather than submission failures; actual model and speech failures retain their task errors.
+
+After group/DLNA validation, position capture, and acquisition of an interaction lease, model requests overlap native-answer stop commands. Both waiting feedback and answer TTS wait until takeover has finished. Task logs record model start, first content, takeover completion, and speech dispatch times. With AI chat enabled, idle conversation-poll backoff is capped at the greater of the user interval and two seconds; otherwise the five-second cap and failure backoff remain unchanged. Cloud conversation availability is outside plugin control.
 
 Chat suspends automatic track advancement and captures the original position and playback revision. Group playback pauses all members, speaks only on the requesting device, and then restores the shared queue at its common position. Offline members generate individual warnings. Previously paused or stopped music is not automatically started. A text-only test replacing spoken chat first stops the old answer and follows that task's music-recovery setting.
 
@@ -26,9 +28,11 @@ Web playback, pause, stop, scheduled playback, sleep-timer expiry, group changes
 
 ## History and Long-Term Memory
 
-Chat data is isolated by account and device, uses independent versioned plugin-storage keys, and remains separate from song memory. Defaults retain 12 context turns, at most 500 historical turns, and 30 days of records. Reference context is limited to 12,000 characters. Follow-up windows do not survive restart; old voice inputs and speech are never replayed.
+Chat data is isolated by account and device, uses independent versioned plugin-storage keys, and remains separate from song memory. New configurations reference the latest three successful turns, with summaries and preference memory off. Existing configurations retain their turn count, memory switch, and summary behavior on upgrade. Defaults keep at most 500 historical turns and 30 days of records, with the existing 12,000-character reference budget. Saving history does not automatically send it to the model. The follow-up window controls voice routing, not context scope, and does not survive restart.
 
-After eight additional completed turns, a background job updates a summary of up to 2,000 characters. Long-term memory automatically extracts explicit user facts and preferences by default, with at most 100 entries per device and 300 characters per entry. Text matching selects at most five relevant memories without embeddings or a vector database. Extraction failures do not block answers. Disable extraction and use, or manually add, edit, delete, and inspect sources. Automatic extraction never overwrites manually maintained entries. Each extracted turn is checkpointed, so coalesced background work keeps intermediate turns. Deleted or cleared memories are not recreated from previously processed conversations.
+Turning off “Include conversation history” sets `context_turns=0`: no old turns or summary are sent, and no summary is generated. When enabled, select 1–24 turns; a turn is one question and answer. Advanced “Keep a summary of earlier conversations” independently allows older references and a summary job after eight new turns (up to 2,000 characters). Summary generation makes additional model requests and pauses while conversation history is off.
+
+“Remember my preferences” independently controls extraction and use of explicit facts/preferences, also making additional model requests. Limits are 100 entries per device, 300 characters each, and five relevant references without a vector database. With both context sources off, only the role prompt and current question are sent. Turning options off keeps local data; deletion uses separate cleanup actions. Automatic extraction never overwrites manual edits. Checkpointed extraction avoids recreating deleted preferences from processed turns. Configuration generations and storage revisions invalidate late background results.
 
 Cancelled and failed tasks remain available for diagnostics but are excluded from successful conversation context. Deleting a turn removes automatically extracted memories from that source and rebuilds the summary; manually maintained memories remain. Resetting a session only changes its context boundary and clears its summary. Clearing history, long-term memory, or all data are separate operations. Storage revision checks reject late writes after deletion or clearing. Corrupt data is never overwritten with defaults.
 
@@ -39,6 +43,7 @@ All paths below are relative to `/api/v1/jsplugin/miot` and require a host JWT. 
 | Method and path | Purpose |
 |---|---|
 | `GET/PUT /chat/config` | Read or partially update chat configuration; disabled by default |
+| `GET /chat/capabilities` | Report incremental HTTP availability (`streaming`) |
 | `GET /chat/models` | List models using the effective chat connection |
 | `POST /chat/messages` | `{account_id, device_id, text, speak?}`; returns 202 `{task_id, phase}`; questions limited to 2,000 characters |
 | `GET /chat/status` | Device query parameters; returns task phase, follow-up window, and latest answer |
@@ -51,7 +56,7 @@ All paths below are relative to `/api/v1/jsplugin/miot` and require a host JWT. 
 | `POST /chat/clear` | Device parameters and `range: history/memory/all` |
 | `WS /chat/ws` | Device query parameters; initial snapshot plus task, answer, and data-revision updates |
 
-The chat connection can reuse analysis credentials or remain independent. Chat, summaries, and extraction use the chat connection. Chat defaults to a 30-second timeout, configurable from 1–30 seconds; analysis retains its existing six-second default. Shared scheduling permits two foreground requests and one low-priority background request, with one foreground model request per device. Cancellation invalidates results; already-issued HTTP requests may continue until the host deadline.
+The chat connection can reuse analysis credentials or remain independent. Chat, summaries, and extraction use the chat connection. Chat defaults to a 30-second timeout, configurable from 1–30 seconds; analysis retains its existing six-second default. Shared scheduling permits two foreground requests and one low-priority background request, with one foreground model request per device. New hosts default to incremental receiving; older hosts use complete responses with a capability message on the page. Disable advanced “Show answers as they arrive” for model endpoints without SSE. Complete JSON returned by a streaming request is handled within that same request, with no automatic retry or duplicate question. Stop, new questions, and plugin shutdown cancel active streaming HTTP. Ordinary HTTP on older hosts or with incremental receiving off may continue to the host deadline. Stream failures/cancellations preserve partial text and actual status, excluded from successful context. Third-party TTS is a separate future plan; this change does not add early native-TTS speech.
 
 ## Module Boundaries and Validation
 

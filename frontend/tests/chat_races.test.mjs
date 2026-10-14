@@ -7,6 +7,55 @@ const flush = async () => {
   for (let i = 0; i < 30; i++)
     await Promise.resolve();
 };
+test('incremental answer updates do not reload all history on every status push', async t => {
+  const vue = await import('vue'), stops = [], requests = [];
+  const state = vue.reactive({ currentAccountId: 'a', currentDeviceId: 'd', chatStatus: null });
+  script('views/settings/ChatSettings.vue', {
+    DEFAULT_CHAT_CONFIG: { trigger_words: ['请问'], context_turns: 3 }, state,
+    reactive: vue.reactive, ref: vue.ref, computed: vue.computed,
+    watch: (...args) => { stops.push(vue.watch(...args)); }, onMounted() {}, onUnmounted() {},
+    query: JSON.stringify, managedDevices: { value: [] }, messageOf: String,
+    get: async path => { requests.push(path); return path.startsWith('/chat/history') ? { history: [], total: 0, summary: '' } : { memories: [] }; },
+  }, 'config');
+  t.after(() => stops.forEach(stop => stop()));
+  state.chatStatus = { task_id: 't', phase: 'generating', memory_revision: 1, answer: 'first' };
+  await vue.nextTick(); await flush();
+  assert.equal(requests.length, 2);
+  for (let i = 0; i < 10; i++) {
+    state.chatStatus = { ...state.chatStatus, answer: 'chunk ' + i };
+    await vue.nextTick(); await flush();
+  }
+  assert.equal(requests.length, 2);
+  state.chatStatus = { ...state.chatStatus, phase: 'completed' };
+  await vue.nextTick(); await flush();
+  assert.equal(requests.length, 4);
+});
+test('history switch restores the selected turn count and one save persists independent memory controls', async () => {
+  let mount;
+  const stored = { trigger_words: ['请问'], context_turns: 6, memory_enabled: false, summary_enabled: true, streaming_enabled: true };
+  const writes = [];
+  const page = script('views/settings/ChatSettings.vue', {
+    DEFAULT_CHAT_CONFIG: { ...stored }, state: { currentAccountId: '', currentDeviceId: '', chatStatus: null },
+    reactive: x => x, ref: value => ({ value }), computed: fn => ({ get value() { return fn(); } }),
+    query: JSON.stringify, managedDevices: { value: [] }, watch() {}, onMounted: fn => { mount = fn; }, onUnmounted() {},
+    get: async path => path === '/chat/config' ? { ...stored } : { streaming: true },
+    put: async (_path, body) => { writes.push(structuredClone(body)); return body; }, notify() {}, messageOf: String,
+  }, 'config, dirty, contextEnabled, setContextEnabled, save');
+  mount(); await flush();
+  assert.equal(page.dirty.value, false);
+  page.setContextEnabled(false);
+  assert.equal(page.config.context_turns, 0);
+  assert.equal(page.dirty.value, true);
+  page.setContextEnabled(true);
+  assert.equal(page.config.context_turns, 6);
+  assert.equal(page.dirty.value, false);
+  page.setContextEnabled(false);
+  await page.save();
+  assert.equal(writes[0].context_turns, 0);
+  assert.equal(writes[0].memory_enabled, false);
+  assert.equal(writes[0].summary_enabled, true); // retained but inactive while history is off
+  assert.equal(page.dirty.value, false);
+});
 function script(file, env, exports) {
   const source = fs.readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)[1].replace(/^import .*;\n/gm, '');
   const js = ts.transpileModule(source + `\nreturn { ${exports} };`, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS } }).outputText;

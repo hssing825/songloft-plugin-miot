@@ -28,6 +28,8 @@
 | 界面异步行为 | HTTP 不覆盖更新的 WS 状态、连接失败仍查状态、断线/建连超时重试、重复关闭不重复重试、切换设备、同设备乱序刷新、保留编辑草稿、重复提交保护、错误可重试、确认期间换设备不删除新设备数据、卸载后不更新 | `frontend/tests/chat_races.test.mjs` |
 | 提交与历史刷新 | 提问已接受但历史读取失败时仍提示提交成功；历史刷新告警不覆盖任务错误，过期告警不污染新刷新 | `frontend/tests/chat_races.test.mjs` |
 
+新增回归：`chat_context_controls.test.mjs` 验证旧配置迁移、零历史、摘要与偏好独立、后台请求禁用；`ai_sse.test.mjs` 验证跨字节 UTF-8、SSE 分帧、部分输出、错误/中断、JSON 兼容和上游取消；`chat_stream_flow.test.mjs` 验证模型与接管并行、DLNA 拒绝、部分文本不进入 TTS、旧任务不误取消新流。前端 `chat_races.test.mjs` 覆盖轮数开关恢复、未保存提示及单一配置保存。宿主 `api_bridge_http_stream_test.go` 覆盖分块读取、权限/并发上限、EOF、超时、取消、卸载与真实 QuickJS 调用；流式文字显示不能证明真实音箱发声。
+
 ## 运行与判断
 
 插件目录执行：

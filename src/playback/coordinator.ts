@@ -52,7 +52,7 @@ export class PlaybackCoordinator {
       token.onCancel?.();
     }
   }
-  async prepare(token: InteractionToken): Promise<void> {
+  async prepare(token: InteractionToken, onReserved?: () => void): Promise<void> {
     const group = await this.config.findDeviceGroup(token.account, token.device);
     if (!token.active)
       return;
@@ -83,6 +83,9 @@ export class PlaybackCoordinator {
     else if (token.restore)
       manager!.suspendForVoiceInteraction();
     token.revision = manager?.getPlaybackRevision() || 0;
+    // The lease and group are now validated. Model work can overlap cloud stop
+    // requests; speech still waits for prepare to resolve.
+    onReserved?.();
     if (token.restore) {
       await Promise.all(token.members.map(async (member) => {
         const result = await this.devices.stopForInteraction(member.account_id, member.device_id, token.isCurrent);

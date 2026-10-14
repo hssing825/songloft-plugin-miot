@@ -94,6 +94,27 @@ async function withMonitor(run) {
 
 const message = timestamp_ms => ({ timestamp_ms, response: { answer: [] } });
 
+test('AI chat caps idle polling at two seconds while retaining longer user intervals and failure backoff', async () => {
+  await withMonitor(async h => {
+    await h.monitor.start();
+    h.monitor.setChatEnabled(true);
+    await h.advance(15000);
+    assert.equal(h.nextDelay(), 2000);
+    h.setRequest(async () => null);
+    await h.advance(2000);
+    assert.equal(h.nextDelay(), 2000); // the next failure doubles the delay
+    await h.advance(2000);
+    assert.equal(h.nextDelay(), 4000);
+  });
+  await withMonitor(async h => {
+    h.setConfig(async () => ({ conversation_poll_interval: 10 }));
+    await h.monitor.start();
+    h.monitor.setChatEnabled(true);
+    await h.advance(30000);
+    assert.equal(h.nextDelay(), 10000);
+  });
+});
+
 test('slow device has one request while other devices keep polling', async () => {
   await withMonitor(async h => {
     await h.monitor.start();

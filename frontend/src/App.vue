@@ -97,7 +97,7 @@ onUnmounted(() => {
       <MainPage v-if="navigation.page !== 'settings' && navigation.page !== 'player'" />
     </template>
     <div v-if="state.chatStatus && ['queued', 'preparing', 'generating', 'speaking', 'resuming', 'unknown', 'failed'].includes(state.chatStatus.phase)" class="chat-activity" role="status">
-      {{ ({ queued: 'AI 排队中', preparing: '暂停音乐', generating: 'AI 生成回答中', speaking: 'AI 播报中', resuming: '恢复音乐中', unknown: '播报结束未确认，请手动恢复音乐', failed: 'AI 对话失败' } as Record<string, string>)[state.chatStatus.phase] }}
+      {{ ({ queued: 'AI 排队中', preparing: '接管音箱', generating: 'AI 生成回答中', speaking: 'AI 播报中', resuming: '恢复音乐中', unknown: '播报结束未确认，请手动恢复音乐', failed: 'AI 对话失败' } as Record<string, string>)[state.chatStatus.phase] }}
       <span v-if="state.chatStatus.error"> · {{ state.chatStatus.error }}</span>
     </div>
     <Snackbar />

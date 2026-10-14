@@ -20,7 +20,7 @@ function storageHarness(t) {
   t.after(() => { songloft.storage = previous; });
   return values;
 }
-const cfg = { ...DEFAULT_CHAT_CONFIG, enabled: true, waiting_feedback: false, memory_enabled: false };
+const cfg = { ...DEFAULT_CHAT_CONFIG, enabled: true, waiting_feedback: false, memory_enabled: false, context_turns: 12, summary_enabled: true };
 const turn = (id, user = '你好', phase = 'completed') => ({ id, user, assistant: '你好！', phase, created_at: Date.now() });
 test('chat defaults preserve old feature flags and analysis connection remains independent', () => {
   assert.equal(DEFAULT_CHAT_CONFIG.enabled, false);

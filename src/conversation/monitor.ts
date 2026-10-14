@@ -87,6 +87,8 @@ export class ConversationMonitor {
   /** 轮询定时器 */
   private pollTimer: any = null;
   private pollingReady = false;
+  private chatEnabled = false;
+  private chatRevision = 0;
   private pollInterval: number = 2000; // 默认2秒，从配置读取
 
   /** 设备监听状态: "accountId:deviceId" → DeviceMonitorState */
@@ -147,6 +149,10 @@ export class ConversationMonitor {
       const intervalSec = Number.isFinite(configuredInterval)
         ? Math.max(1, Math.min(30, configuredInterval)) : 2;
       this.pollInterval = intervalSec * 1000;
+      const chatRevision = this.chatRevision;
+      const chatConfig = await this.configManager.getChatConfig?.().catch(() => null);
+      if (chatRevision === this.chatRevision) this.chatEnabled = !!chatConfig?.enabled;
+      if (!this.isCurrent(generation)) return;
 
       // 等待设备列表刷新完成，确保 getStatus() 能读到真实设备数
       await this.refreshDevices(generation);
@@ -187,6 +193,8 @@ export class ConversationMonitor {
   /**
    * 停止对话监听
    */
+  setChatEnabled(enabled: boolean): void { this.chatRevision++; this.chatEnabled = enabled; }
+
   stop(): void {
     if (!this.enabled && this.pollTimer === null) {
       return;
@@ -404,7 +412,7 @@ export class ConversationMonitor {
 
   private deferIdlePoll(dm: DeviceMonitorState): void {
     // 用户主动设置的大间隔仍是下限，退避不能反而提高请求频率。
-    const maxIdleDelayMs = Math.max(5000, this.pollInterval);
+    const maxIdleDelayMs = Math.max(this.chatEnabled ? 2000 : 5000, this.pollInterval);
     dm.idleDelayMs = Math.min(maxIdleDelayMs, Math.max(this.pollInterval * 2, dm.idleDelayMs * 2));
     dm.nextPollAt = Date.now() + dm.idleDelayMs;
   }

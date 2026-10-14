@@ -33,7 +33,7 @@ export async function validateChatTarget(config: ConfigManager, input: Record<st
     throw new Error('设备不存在或未启用管理');
   return { account, device, scope: chatScope(account, device) };
 }
-export function registerChatHandlers(router: Router, config: ConfigManager, chat: AIChatService): void {
+export function registerChatHandlers(router: Router, config: ConfigManager, chat: AIChatService, onConfigChanged?: (config: ChatConfig) => void): void {
   const wrap = (run: (req: HTTPRequest, params: Record<string, string>) => Promise<HTTPResponse>) => async (req: HTTPRequest, params: Record<string, string>) => {
     try {
       return await run(req, params);
@@ -43,11 +43,13 @@ export function registerChatHandlers(router: Router, config: ConfigManager, chat
     }
   };
   const target = (req: HTTPRequest, body?: Record<string, unknown>) => validateChatTarget(config, body || parseQuery(req.query));
+  router.get('/chat/capabilities', wrap(async () => jsonResponse({ streaming: typeof songloft.net?.httpStream === 'function' })));
   router.get('/chat/config', wrap(async () => jsonResponse(await config.getChatConfig())));
   router.put('/chat/config', wrap(async (req) => {
     const next = await config.saveChatConfig(chatBody(req) as Partial<ChatConfig>);
     await chat.cancelAll();
     chat.configurationChanged();
+    onConfigChanged?.(next);
     return jsonResponse(next);
   }));
   router.get('/chat/models', wrap(async () => {
