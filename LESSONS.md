@@ -28,6 +28,15 @@
 - Not run：LX05 真机试听、问题原音频、固件版本、实际安装的服务端 SHA 与长期运行。设备自动循环至云端采样确认之间仍可能短暂重播；彻底丢失媒体后且已越过元数据尾部的准确 seek 仍依赖核实原音频/服务端时长，不能宣称整个 Issue 已解决。
 - Seen 1× (2026-10-14)。状态：经验，时长差异与真实衔接仍待验收。
 
+### UI-001：触摸滚动复现前先校准输入并核对采样状态
+
+- 范围：手机尺寸下的插件设置页、Docker Chrome 触摸模拟和 Android 原生 WebView。
+- 规则：不能把自动化驱动没有产生滚动直接判为页面 Bug；先用普通长内容滚动容器作对照，确认相同输入确实改变 `scrollTop`。原生测试还要确认应用在前台、采样时间持续更新及触摸事件实际增加；崩溃后或导航未进入插件时的旧记录不能算复现。区分桌面 Chrome 手机模拟、Android 模拟器与报告人真机。
+- 证据：2026-10-14 调查 [songloft-org/songloft#519](https://github.com/songloft-org/songloft/issues/519)，Docker Chrome 121.0.6167.85 的 `Input.synthesizeScrollGesture(gestureSourceType=touch)` 在普通滚动容器上也保持 `scrollTop=0`；改用 `Input.dispatchTouchEvent` 后对照滚到 265。原生第一轮 Android 15 实验性 16KB 镜像的 WebView 124 在 `MemoryInfra` 线程发生 `libmonochrome_64.so` SIGTRAP，应用退出后的“不滚动”记录也被丢弃；普通 4KB 镜像复测没有崩溃。尚未证明该崩溃的根因，不能将其当作报告人的 #519。
+- Done right：先隔离 `db4bd0c2fc5ad55a7a557743fe691480f300ce28`（v2026.10.14）源码完成浏览器对照，再安装 SHA-256 已核对的官方 Android 2.13.1 x86_64 APK、官方 2.13.0 lite 后端，最终换用 10.14 正式插件包的原始 JS/CSS；仅 HTML 增加被动遥测，设备/歌曲 API 使用 fixture。Android 15 / WebView 124.0.6367.219 / 4KB 镜像中，底部 Tab 与首页独立入口的六个分类共 12 项滚动均通过，两项标签/前后台恢复通过；缩短屏幕后分类菜单从 0 滚到 184。JSON 报告和截图在 `/tmp/songloft-519-android-2131/`，总报告 `report.json`。未修改功能代码，本地已有业务改动保留。
+- Not run：报告人真机、ARM APK 运行及真实设备/云端配置。尚未确定故障分类、入口、手机型号及 Android/System WebView 版本；模拟器未复现不能写成 Issue 已修复，也不将其归为 Windows #499。
+- Seen 1× (2026-10-14)。状态：经验，#519 根因待原环境取证。
+
 ### MIOT-004：上下文关闭必须同时约束请求内容与后台生成
 
 - 范围：AI 对话的历史、摘要、偏好记忆及配置迁移。

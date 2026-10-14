@@ -28,6 +28,15 @@ Include rule, scope, full owner/repo#number, failure/fix commit SHAs, actual val
 - Not run: physical LX05 playback, original problem audio, firmware version, installed server SHA, and long-running acceptance. Brief device looping before cloud confirmation can remain. Accurate seeking after lost media beyond metadata duration still requires original audio/server-duration verification; the entire issue is not declared resolved.
 - Seen 1× (2026-10-14). Status: lesson; duration differences and physical transition behavior await acceptance.
 
+### UI-001: Calibrate touch input and verify that samples are current
+
+- Scope: mobile-sized plugin settings, Docker Chrome touch emulation, and native Android WebView.
+- Rule: Do not treat missing automated scrolling as a page bug. First verify that identical input changes `scrollTop` in an ordinary overflowing control. Native checks must also confirm the foreground app, advancing sample timestamps, and increasing touch events. Discard old samples after a crash or navigation that did not enter the plugin. Distinguish desktop Chrome emulation, Android emulators, and the reporter's physical phone.
+- Evidence: investigating [songloft-org/songloft#519](https://github.com/songloft-org/songloft/issues/519) on 2026-10-14, Docker Chrome 121.0.6167.85 kept `scrollTop=0` even in a normal control with `Input.synthesizeScrollGesture(gestureSourceType=touch)`; `Input.dispatchTouchEvent` moved that control to 265. The initial native Android 15 experimental 16KB image's WebView 124 crashed with SIGTRAP in `libmonochrome_64.so` on `MemoryInfra`; non-scrolling samples after app exit were discarded. Retesting on a standard 4KB image recorded no crash. The crash root cause remains unproven and is not established as the reporter's #519.
+- Done right: isolate `db4bd0c2fc5ad55a7a557743fe691480f300ce28` (v2026.10.14) for browser controls, then install the SHA-256-verified official Android 2.13.1 x86_64 APK and official 2.13.0 lite backend. Final checks use unchanged JS/CSS from the official October 14 plugin release; only HTML adds passive telemetry, with fixture device/song APIs. Android 15 / WebView 124.0.6367.219 / 4KB passed all six categories in both the bottom Tab and standalone home entry (12 scroll checks), two Tab/app lifecycle checks, and a reduced-height menu scrolling from 0 to 184. JSON evidence and screenshots: `/tmp/songloft-519-android-2131/`, consolidated in `report.json`. No functional source changes; existing worktree changes are preserved.
+- Not run: the reporter's physical phone, ARM APK runtime, and actual device/cloud configuration. The failing category, entry, phone model, Android version, and System WebView version remain unknown. An emulator non-reproduction is not an issue fix and does not establish a link to Windows #499.
+- Seen 1× (2026-10-14). Status: lesson; #519 awaits evidence from the original environment.
+
 ### MIOT-004: Disabling context must govern both request content and background generation
 
 - Scope: AI chat history, summaries, preference memory, and configuration migration.
