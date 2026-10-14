@@ -7,7 +7,7 @@
 import { ConfigManager, playlistProgressScope } from '../config/manager';
 import { MinaService } from '../service/service';
 import { URLBuilder, playbackOptionsOf, playbackOptionsFromConfig } from './url_builder';
-import { isDeviceIdle, isDeviceStatusKnown } from '../playback/device_state';
+import { hasLostDeviceMedia, isDeviceIdle, isDeviceStatusKnown } from '../playback/device_state';
 import { getHostBaseUrl, callHostAPI } from '../utils/http';
 import { isDebugLog } from '../utils/debug';
 import type { PlayState, PlayMode, PlayerStatus, DeviceTargetRef, DeviceGroup } from '../types';
@@ -165,6 +165,8 @@ interface DeadlineTailEvidence {
 /** 仅在服务器本地时间整点后 90 秒内识别；不按时钟无条件推歌。 */
 const HOURLY_RESUME_WINDOW_MS = 90000;
 const HOURLY_RESUME_POLL_MS = 5000;
+const HOURLY_RESUME_FAST_POLL_MS = 1000;
+const HOURLY_RESUME_FAST_QUERIES = 4;
 
 interface HourlyResumeTask {
   position: number;
@@ -2995,15 +2997,23 @@ export class PlaylistManager {
     let lastSampleAt = task.startedAt - 1;
     let lastPosition = -1;
     let idleHits = 0;
+    let fastQueries = 0;
+    let idleConfirmationQueries = 0;
     while (task.isCurrent() && Date.now() - task.startedAt < timeoutMs) {
       const config = await this.configManager.getConfig();
       if (!task.isCurrent()) return;
       if (config.hourly_chime_resume_enabled !== true) { this.cancelHourlyResume(); return; }
-      const st = await this.minaService.getPlayState(this.accountId, this.deviceId);
+      const confirmIdle = idleHits === 1 && idleConfirmationQueries < 1;
+      const fast = fastQueries < HOURLY_RESUME_FAST_QUERIES || confirmIdle;
+      if (fastQueries < HOURLY_RESUME_FAST_QUERIES) fastQueries++;
+      else if (confirmIdle) idleConfirmationQueries++;
+      const st = await this.minaService.getPlayState(this.accountId, this.deviceId, fast ? { verify: true } : {});
       if (!task.isCurrent()) return;
       if (Date.now() - task.startedAt >= timeoutMs) break;
       const sampleAt = st.sampledAt ?? Date.now();
       if (st.status < 0) {
+        fastQueries = HOURLY_RESUME_FAST_QUERIES;
+        idleConfirmationQueries = 1;
         idleHits = 0;
         lastPosition = -1;
       } else if (sampleAt > lastSampleAt && sampleAt >= task.startedAt) {
@@ -3029,9 +3039,11 @@ export class PlaylistManager {
           if (latestConfig.hourly_chime_resume_enabled !== true) { this.cancelHourlyResume(); return; }
           task.waiting = false;
           this.playStartTimeMs = Date.now() - task.position / this.playbackSpeed * 1000;
-          const resumed = await this.resumePlayback({ positionSec: task.position, isCurrent: task.isCurrent });
+          // L15A 停止后媒体详情已丢失：裸 play 无法恢复，直接重推以省掉无效指令和校验等待。
+          const resumed = !hasLostDeviceMedia(st) &&
+            await this.resumePlayback({ positionSec: task.position, isCurrent: task.isCurrent });
           if (!resumed && task.isCurrent()) {
-            const replayed = await this.replayCurrent(task.position, task.isCurrent);
+            const replayed = await this.replayCurrent(this.getSafeResumePosition(task.position), task.isCurrent);
             if (!replayed && task.isCurrent()) await this.stop(false);
           }
           return;
@@ -3044,7 +3056,8 @@ export class PlaylistManager {
           this.hourlyResumeWake = null;
           resolve();
         },
-          Math.min(HOURLY_RESUME_POLL_MS, timeoutMs - (Date.now() - task.startedAt)));
+          Math.min(fastQueries < HOURLY_RESUME_FAST_QUERIES || (idleHits === 1 && idleConfirmationQueries < 1)
+            ? HOURLY_RESUME_FAST_POLL_MS : HOURLY_RESUME_POLL_MS, timeoutMs - (Date.now() - task.startedAt)));
       });
     }
     if (task.isCurrent()) {

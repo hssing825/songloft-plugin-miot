@@ -10,6 +10,16 @@ Include rule, scope, full owner/repo#number, failure/fix commit SHAs, actual val
 
 ## Entries
 
+### MIOT-003: A recovery task can outlive the timer that started it
+
+- Scope: voice recovery tasks, hourly recovery, and timer compatibility with older hosts.
+- Feedback: [latest songloft-org/songloft#481 comment](https://github.com/songloft-org/songloft/issues/481#issuecomment-6160171475), 2026-10-14: long recovery waits and tracks ending without advancing. The log creates hourly recovery at 11:00:47.820, sends bare play at 11:00:59.323, and repushes only at 11:01:04.319 after status=0. A next-track timer registered at 10:06:44.505 has no firing entry. The log has neither a backend SHA nor timer IDs, so that missing timer cannot be conclusively attributed to handle reuse.
+- Reproduction: at baseline `0ba32df6314542856dfc4f9253400f59e373acc6`, a started voice task retains its expired timeout handle. Using the timer-reuse semantics of released host v2.13.1, cancelling the recovered task deletes a transition timer that reused the same ID; the new regression fails on the isolated old implementation because the next-track URL is never sent. Host [32ff4ca](https://github.com/songloft-org/songloft/commit/32ff4ca8002d898fdf79012772610e2c8e45f3f1) fixes global handle reuse but is absent from v2.13.1; updating only the plugin does not update the host.
+- Fix: this change clears the handle immediately in its callback, retaining task identity for background verification and cancellation. After consecutive fresh idle confirmations, voice/hourly recovery directly repushes a safe seek URL when status=0/3 has neither position nor stream duration, avoiding ineffective bare play and another verification round. Media-bearing or paused states retain resume verification. Hourly recovery allows at most four fast queries plus one late idle confirmation; a failed query immediately restores normal spacing rather than continuously bypassing backoff.
+- Done right: all ten new cases fail for the intended behavior on the isolated old implementation. The fix passes all 862 plugin tests, 62 frontend tests, type checks, build/package validation, and parent `make check`. Coverage includes actual URLs for two consecutive natural transitions after cancellation on a recycling host, missing media, the shared five-second cache, half-second cloud responses, speech waiting, and failure backoff. Simulated repush completes three seconds after voice scheduling or two seconds after hourly task creation with two half-second responses; this excludes conversation discovery, interruption detection, and real device buffering, and is not a promise of matching device latency.
+- Not run: audible L15A playback, original problem tracks, and long-running acceptance; the reporter's backend version still needs confirmation. The existing twenty-second background interruption-detection cadence remains; this change shortens recovery after interruption has been confirmed.
+- Seen 1× (2026-10-14). Status: lesson; see the device regression matrix in [AGENTS.en.md](AGENTS.en.md).
+
 ### MIOT-002: Report asynchronous submission and subsequent page refresh separately
 
 - Scope: AI chat tests and other page actions that refresh history after submission.

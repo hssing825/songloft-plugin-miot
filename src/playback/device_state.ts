@@ -9,3 +9,8 @@ export function isDeviceIdle(status: number): boolean {
 export function isDeviceStatusKnown(status: number): boolean {
   return status === 1 || isDeviceIdle(status);
 }
+
+/** 连续 idle 确认后，停止/空闲且媒体详情已丢失的设备需要带位置重推。 */
+export function hasLostDeviceMedia(state: { status: number; hasPosition: boolean; duration: number }): boolean {
+  return (state.status === 0 || state.status === 3) && state.hasPosition === false && state.duration === 0;
+}

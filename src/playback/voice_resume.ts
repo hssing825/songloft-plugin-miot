@@ -1,6 +1,6 @@
 import type { ConfigManager } from '../config/manager';
 import type { MinaService } from '../service/service';
-import { isDeviceIdle, isDeviceStatusKnown } from './device_state';
+import { hasLostDeviceMedia, isDeviceIdle, isDeviceStatusKnown } from './device_state';
 
 interface SmartResumeTask {
   accountId: string;
@@ -16,14 +16,15 @@ const SMART_RESUME_FAST_QUERIES = 4;
 const SMART_RESUME_NORMAL_INTERVAL_MS = 5000;
 
 export class VoiceResumeCoordinator {
-  private tasks = new Map<string, { task: SmartResumeTask; timer: ReturnType<typeof setTimeout> }>();
+  private tasks = new Map<string, { task: SmartResumeTask; timer: ReturnType<typeof setTimeout> | null }>();
   constructor(private configManager: ConfigManager, private minaService: MinaService, private enabled: () => boolean) { }
   /** 取消待执行的语音恢复操作。 */
   cancel(accountId?: string, deviceId?: string): void {
     for (const [key, entry] of this.tasks) {
       if (accountId && entry.task.accountId !== accountId) continue;
       if (deviceId && entry.task.deviceId !== deviceId) continue;
-      clearTimeout(entry.timer); this.tasks.delete(key);
+      if (entry.timer !== null) clearTimeout(entry.timer);
+      this.tasks.delete(key);
     }
   }
 
@@ -39,12 +40,15 @@ export class VoiceResumeCoordinator {
       position: pm.getPosition(),
     };
     const key = JSON.stringify([accountId, deviceId]);
-    const timer = setTimeout(() => {
+    const entry = { task, timer: null as ReturnType<typeof setTimeout> | null };
+    entry.timer = setTimeout(() => {
+      // 旧宿主立即复用到期句柄；取消任务时不能再清理它（#481/#514）。
+      entry.timer = null;
       void this.smartResume(pm, task).catch(e => {
         songloft.log.warn('[VoiceEngine] Smart resume failed: ' + String(e));
       });
     }, SMART_RESUME_INITIAL_DELAY_MS);
-    this.tasks.set(key, { task, timer });
+    this.tasks.set(key, entry);
   }
 
   /**
@@ -59,6 +63,7 @@ export class VoiceResumeCoordinator {
     const timeoutSec = Math.max(5, Math.min(120, config.smart_resume_timeout ?? 30));
     const maxWaitMs = timeoutSec * 1000;
     let deviceBecameIdle = false;
+    let mediaContextLost = false;
     let deviceTakenOver = false;
     let deviceRestarted = false;
     let resumePosition = task.position;
@@ -131,6 +136,7 @@ export class VoiceResumeCoordinator {
           // 两次新采样确认，给延迟启动的播报留出窗口，缓存不能累积命中。
           if (idleHits >= 2) {
             deviceBecameIdle = true;
+            mediaContextLost = hasLostDeviceMedia(st);
             break;
           }
         } else if (st.status === 1) {
@@ -173,7 +179,7 @@ export class VoiceResumeCoordinator {
       songloft.log.warn('[VoiceEngine] Speech timeout with status-only playback; replaying saved position');
     }
 
-    if (deviceBecameIdle && !deviceTakenOver) {
+    if (deviceBecameIdle && !deviceTakenOver && !mediaContextLost) {
       const resumed = await pm.resumePlayback({ positionSec: resumePosition, isCurrent: isTaskCurrent });
       if (resumed) {
         songloft.log.info('[VoiceEngine] Resume command sent after voice interaction; verification pending');

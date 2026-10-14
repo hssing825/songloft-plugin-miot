@@ -69,7 +69,7 @@ async function flush() {
   for (let i = 0; i < 40; i++) await Promise.resolve();
 }
 
-async function withClock(run) {
+async function withClock(run, { recycleTimerIds = false } = {}) {
   const original = {
     setTimeout: globalThis.setTimeout,
     clearTimeout: globalThis.clearTimeout,
@@ -80,16 +80,21 @@ async function withClock(run) {
   };
   let now = 100000;
   let timerId = 0;
+  const freeTimerIds = [];
   const timers = new Map();
   const logs = [];
   const hostCalls = [];
   Date.now = () => now;
   Math.random = () => 0;
   globalThis.setTimeout = (fn, delay) => {
-    timers.set(++timerId, { fn, at: now + delay });
-    return timerId;
+    const id = recycleTimerIds && freeTimerIds.length ? freeTimerIds.pop() : ++timerId;
+    timers.set(id, { fn, at: now + delay });
+    return id;
   };
-  globalThis.clearTimeout = id => timers.delete(id);
+  globalThis.clearTimeout = id => {
+    timers.delete(id);
+    if (recycleTimerIds) freeTimerIds.push(id);
+  };
   globalThis.songloft = {
     log: Object.fromEntries(['info', 'warn', 'error'].map(level => [level, message => logs.push(message)])),
     plugin: { getToken: async () => 'test-token' },
@@ -102,6 +107,7 @@ async function withClock(run) {
       if (!next) break;
       const [id, timer] = next;
       timers.delete(id);
+      if (recycleTimerIds) freeTimerIds.push(id);
       now = timer.at;
       timer.fn();
       await flush();
@@ -1877,8 +1883,8 @@ async function hourlySession(h, { enabled = true, readState, readConfig, resumeR
       getPlayState: async (_account, _device, options) => readState
         ? readState({ resumes, options })
         : {
-          status: resumes.length ? 1 : 0, position: resumes.length ? 120 + (Date.now() - resumes[0]) / 1000 : 0,
-          duration: resumes.length ? duration : 0, hasPosition: resumes.length > 0, sampledAt: Date.now()
+          status: resumes.length ? 1 : 2, position: resumes.length ? 120 + (Date.now() - resumes[0]) / 1000 : 120,
+          duration, hasPosition: true, sampledAt: Date.now()
         },
     },
   });
@@ -1911,11 +1917,12 @@ test('idle after a chime resumes the current song and excludes detection/wait ti
     const s = await hourlySession(h);
     assert.equal(s.manager.isHourlyResumePending(), true);
     assert.equal(s.manager.getPosition(), 120);
-    await h.advance(4000);
+    await h.advance(999);
     assert.equal(s.manager.getPosition(), 120);
     assert.equal(s.resumes.length, 0);
-    await h.advance(4000);
+    await h.advance(1);
     assert.equal(s.resumes.length, 1);
+    await h.advance(3000);
     assert.equal(s.pushes.length, 0);
     assert.equal(s.manager.currentIndex, 0);
     assert.equal(s.manager.isSongUnplayable(16), false);
@@ -1964,7 +1971,7 @@ for (const [seek, speed] of [[0, 1], [60, 0.5], [40, 2]]) {
 
 test('a successful resume response without progress falls back to seek on the same song', async () => {
   await withClock(async h => {
-    const s = await hourlySession(h, { readState: () => ({ status: 0, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() }) });
+    const s = await hourlySession(h, { readState: () => ({ status: 2, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() }) });
     await h.advance(8000);
     assert.equal(s.resumes.length, 1);
     assert.equal(s.pushes.length, 1);
@@ -2040,7 +2047,7 @@ test('device progress after a chime only rebuilds the timer without sending play
         };
       }
     });
-    await h.advance(5000);
+    await h.advance(1000);
     assert.equal(s.manager.isHourlyResumePending(), false);
     assert.equal(s.resumes.length, 0);
     assert.equal(s.pushes.length, 0);
@@ -2406,3 +2413,169 @@ test('DLNA takeover invalidates pending voice analysis before it can replace the
     assert.deepEqual(calls, []); assert.equal(manager.isExternalPlayback(), true); dispatcher.close(); manager.cleanup();
   });
 });
+
+// Reproduce the released host's pre-32ff4ca timer pool, including stale cancellation.
+test('issue 481: cancelling a completed voice task cannot erase the next songs on a recycling host', async () => {
+  await withClock(async h => {
+    let startedAt;
+    const s = voiceSession({
+      position: 98, readState: () => ({
+        status: 1, position: 98 + (Date.now() - startedAt) / 1000,
+        duration: 300, hasPosition: true, sampledAt: Date.now(),
+      })
+    });
+    startedAt = Date.now();
+    await h.advance(2000);
+    assert.equal(s.manager.isVoiceSuspended(), false);
+    s.engine.cancelPendingResume('account', 'speaker');
+    await h.advance(199999);
+    assert.equal(s.manager.currentIndex, 0);
+    await h.advance(1);
+    assert.equal(s.manager.currentIndex, 1);
+    assert.match(s.pushes[0], /songs\/17\/play/);
+    // The new stream does not report position, like the L15A in the report.
+    s.manager.minaService.getPlayState = async () => ({ status: 1, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() });
+    await h.advance(299999);
+    assert.equal(s.manager.currentIndex, 1);
+    await h.advance(1);
+    assert.equal(s.manager.currentIndex, 2);
+    assert.match(s.pushes[1], /songs\/18\/play/);
+    assert.equal(s.manager.unplayableSongs.size, 0);
+    assert.equal(s.manager.state, 'playing');
+    s.manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  }, { recycleTimerIds: true });
+});
+
+for (const status of [0, 3]) {
+  test(`issue 481: voice recovery repushes missing media promptly after fresh idle ${status}`, async () => {
+    await withClock(async h => {
+      const s = voiceSession({ position: 98.5, readState: () => ({ status, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() }) });
+      await h.advance(1999);
+      assert.equal(s.pushes.length, 0);
+      await h.advance(1);
+      assert.equal(s.pushes.length, 1);
+      assert.match(s.pushes[0], /seek=98/);
+      assert.equal(s.resumes.length, 0, 'an empty stopped media context needs a seek URL');
+      assert.equal(s.manager.devicePositionObserved, false);
+      s.engine.setEnabled(false);
+      s.manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+  test(`issue 481: hourly recovery promptly repushes missing media after fresh idle ${status}`, async () => {
+    await withClock(async h => {
+      const s = await hourlySession(h, { readState: () => ({ status, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() }) });
+      await h.advance(999);
+      assert.equal(s.pushes.length, 0);
+      await h.advance(1);
+      assert.equal(s.pushes.length, 1);
+      assert.match(s.pushes[0], /seek=120/);
+      assert.equal(s.resumes.length, 0);
+      assert.equal(s.manager.devicePositionObserved, false);
+      s.manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+// Model Mina's shared five-second cache and cloud latency rather than always returning a fresh stub.
+test('issue 481: hourly idle verification bypasses the shared cache in a bounded fast window', async () => {
+  await withClock(async h => {
+    const queries = [];
+    let cachedAt;
+    const s = await hourlySession(h, {
+      readState: ({ options }) => {
+        queries.push({ at: Date.now(), verify: options?.verify });
+        if (cachedAt === undefined || Date.now() - cachedAt >= 5000) cachedAt = Date.now();
+        return {
+          status: 0, position: 0, duration: 0, hasPosition: false,
+          sampledAt: options?.verify ? Date.now() : cachedAt
+        };
+      }
+    });
+    const detectedAt = Date.now();
+    await h.advance(1000);
+    assert.equal(s.pushes.length, 1, 'two fresh idle responses should not wait for a five-second cache rollover');
+    assert.match(s.pushes[0], /seek=120/);
+    assert.equal(s.resumes.length, 0);
+    assert.equal(queries.filter(q => q.at >= detectedAt && q.verify).length, 2);
+    s.manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+test('issue 481: hourly cloud failure ends fast verification and preserves retry backoff', async () => {
+  await withClock(async h => {
+    const queries = [];
+    const s = await hourlySession(h);
+    s.manager.minaService.getPlayState = async (_account, _device, options) => {
+      queries.push({ at: Date.now(), verify: options?.verify });
+      return { status: -1, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() };
+    };
+    await h.advance(1000);
+    assert.equal(queries.length, 1);
+    assert.equal(queries[0].verify, true);
+    await h.advance(4999);
+    assert.equal(queries.length, 1);
+    await h.advance(1);
+    assert.equal(queries.length, 2);
+    assert.equal(queries[1].verify, undefined);
+    assert.equal(s.pushes.length, 0);
+    assert.equal(s.resumes.length, 0);
+    s.manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+test('issue 481: hourly speech is not interrupted when the fast verification budget runs out', async () => {
+  await withClock(async h => {
+    let speaking = true;
+    const queries = [];
+    const s = await hourlySession(h, {
+      readState: ({ options }) => {
+        queries.push({ at: Date.now(), verify: options?.verify });
+        return { status: queries.length <= 2 ? 0 : speaking ? 1 : 3, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() };
+      }
+    });
+    await h.advance(7999);
+    assert.equal(s.pushes.length, 0);
+    assert.equal(s.resumes.length, 0);
+    assert.equal(queries.filter(q => q.verify).length, 4);
+    speaking = false;
+    await h.advance(1000);
+    assert.equal(s.pushes.length, 0, 'one idle sample cannot interrupt a delayed reply');
+    await h.advance(1);
+    assert.equal(s.pushes.length, 1);
+    assert.equal(queries.filter(q => q.verify).length, 5, 'only one extra prompt idle confirmation is allowed');
+    assert.equal(s.resumes.length, 0);
+    s.manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+for (const kind of ['voice', 'hourly']) {
+  test(`issue 481: ${kind} recovery avoids a second verification round with half-second cloud responses`, async () => {
+    await withClock(async h => {
+      let reads = 0;
+      const readState = () => {
+        if (kind === 'hourly' && ++reads <= 2)
+          return { status: 3, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() };
+        return new Promise(resolve => setTimeout(() => resolve({
+          status: 3, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now(),
+        }), 500));
+      };
+      const s = kind === 'voice' ? voiceSession({ position: 98.5, readState }) : await hourlySession(h, { readState });
+      const delay = kind === 'voice' ? 3000 : 2000;
+      await h.advance(delay - 1);
+      assert.equal(s.pushes.length, 0);
+      await h.advance(1);
+      assert.equal(s.pushes.length, 1);
+      assert.match(s.pushes[0], kind === 'voice' ? /seek=98/ : /seek=120/);
+      assert.equal(s.resumes.length, 0);
+      s.engine?.setEnabled(false);
+      s.manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
