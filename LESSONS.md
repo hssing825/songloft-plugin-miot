@@ -34,8 +34,18 @@
 - 规则：不能把自动化驱动没有产生滚动直接判为页面 Bug；先用普通长内容滚动容器作对照，确认相同输入确实改变 `scrollTop`。原生测试还要确认应用在前台、采样时间持续更新及触摸事件实际增加；崩溃后或导航未进入插件时的旧记录不能算复现。区分桌面 Chrome 手机模拟、Android 模拟器与报告人真机。
 - 证据：2026-10-14 调查 [songloft-org/songloft#519](https://github.com/songloft-org/songloft/issues/519)，Docker Chrome 121.0.6167.85 的 `Input.synthesizeScrollGesture(gestureSourceType=touch)` 在普通滚动容器上也保持 `scrollTop=0`；改用 `Input.dispatchTouchEvent` 后对照滚到 265。原生第一轮 Android 15 实验性 16KB 镜像的 WebView 124 在 `MemoryInfra` 线程发生 `libmonochrome_64.so` SIGTRAP，应用退出后的“不滚动”记录也被丢弃；普通 4KB 镜像复测没有崩溃。尚未证明该崩溃的根因，不能将其当作报告人的 #519。
 - Done right：先隔离 `db4bd0c2fc5ad55a7a557743fe691480f300ce28`（v2026.10.14）源码完成浏览器对照，再安装 SHA-256 已核对的官方 Android 2.13.1 x86_64 APK、官方 2.13.0 lite 后端，最终换用 10.14 正式插件包的原始 JS/CSS；仅 HTML 增加被动遥测，设备/歌曲 API 使用 fixture。Android 15 / WebView 124.0.6367.219 / 4KB 镜像中，底部 Tab 与首页独立入口的六个分类共 12 项滚动均通过，两项标签/前后台恢复通过；缩短屏幕后分类菜单从 0 滚到 184。JSON 报告和截图在 `/tmp/songloft-519-android-2131/`，总报告 `report.json`。未修改功能代码，本地已有业务改动保留。
-- Not run：报告人真机、ARM APK 运行及真实设备/云端配置。尚未确定故障分类、入口、手机型号及 Android/System WebView 版本；模拟器未复现不能写成 Issue 已修复，也不将其归为 Windows #499。
-- Seen 1× (2026-10-14)。状态：经验，#519 根因待原环境取证。
+- Not run：报告人真机、ARM APK 运行及真实设备/云端配置。后续评论已补齐红米 Note 9/Note 7、Android 12、WebView 103.0.5060.129、底部智能音箱入口和分类内滚动故障；此前 WebView 124 未复现不能写成 Issue 已修复，也不将其归为 Windows #499。
+- Seen 1× (2026-10-14)。状态：经验；旧内核高度回退的后续取证见 UI-002，报告人真机仍待复验。
+
+### UI-002：含变量的新版单位声明可能使旧浏览器丢掉回退
+
+- 范围：MIoT 设置页的确定高度、旧 Chromium/WebView 和安全区布局。
+- 规则：不能仅在 `calc(100dvh - ... - var(...))` 前写 `vh` 就认为兼容旧内核。含 `var()` 的声明可能在计算时才发现单位不支持，此时不会重新选择前面的声明。优先复用父元素的确定内容高度；必须混用新版单位与变量时，用 `@supports` 隔离，并在实际旧内核验证高度与触摸滚动。
+- 证据：2026-10-14，[songloft-org/songloft#519 的补充评论](https://github.com/songloft-org/songloft/issues/519#issuecomment-6170532402) 确认 Android 12 / WebView 103 分类内不滚动，录屏展示播放与设备分类。此前 `c4d5a80066ee51c4c694fb6d7a4ae01774499f37` 只添加了 `vh` 回退。基线 `566dea7bd1cd2ee78ca46131933d603b52337d1b` 的隔离构建在 Docker Chromium 103.0.5058.0 / 104.0.5109.0 下，390×640 的设备分类加长内容后高度变成 3059px，触摸前后 `scrollTop=0`；同一输入的普通容器对照正常，新浏览器也正常。
+- 修复：本次未提交工作树把 `.settings-scroll-body` 改为 `height: 100%`，继承已预留顶部栏与安全区的父页面内容高度；父页面不含变量的 `100vh` / `100dvh` 声明仍可正常回退。新增 `frontend/tests/settings_scroll.browser.cjs`，先校准触摸，再核对实际分类、容器边界和 `scrollTop`。
+- Done right：Chromium 103.0.5058.0 / 104.0.5109.0 / 121.0.6167.85 分别通过六个分类 × 三种屏幕尺寸的 18 项检查，包含 24px 顶部安全区；旧内核中的设备分类高度恢复为 584px，滑动后 `scrollTop=225`。901 项插件测试、64 项前端测试、两层类型检查、QuickJS 构建与包校验通过。使用模拟 API 和加长内容检查布局；三个内核均验证了同一完整插件包。日志、JSON 和截图在 `/tmp/songloft-519-followup/`。
+- Not run：红米 Note 9/Note 7 真机、Android 12 原生 WebView 103.0.5060.129、真实账号/音箱配置。桌面旧内核的复现与修复验证不能写成报告人真机已验收。
+- Seen 1× (2026-10-14)。状态：经验；代码修复已本地验证，发布与真机复验待完成。
 
 ### MIOT-004：上下文关闭必须同时约束请求内容与后台生成
 
