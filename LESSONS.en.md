@@ -10,6 +10,16 @@ Include rule, scope, full owner/repo#number, failure/fix commit SHAs, actual val
 
 ## Entries
 
+### MIOT-006: Artist and playlist playback need external search after a local miss
+
+- Scope: rule and AI execution of `play_artist` / `play_playlist`.
+- Evidence: on 2026-10-15, [songloft-org/songloft#522](https://github.com/songloft-org/songloft/issues/522) reported that configured external sources were unused when local artist/playlist lookup missed. Baseline `05bb8133c0057ca7a06ff36f416f7d69833d17b9` returns immediately from both executors after a local miss. Current source already has failure TTS but lacks external fallback; the reported silence does not establish that all versions lack feedback.
+- Fix: this change uses the parsed name as the external keyword when an artist has no local songs, its songs cannot be loaded, a named playlist misses/is empty, or the index is unavailable. Reuse `findExternalSongCandidate` / `playSongCandidate` without pretending the artist/playlist name is a song title hint or repeating prepare/stop. Local hits retain random artist queues/original playlists; empty arguments retain default-playlist and resume behavior.
+- Done right: 22 of 37 new regressions fail for the intended behavior in an isolated baseline copy, and all pass after the fix. All 938 plugin tests, type checking, QuickJS build, and package validation pass. Tests use the real `OnlineSearcher` with fixture HTTP/device interfaces, asserting keywords, playback URLs after import, a single interruption, incremental indexing, no-import direct push, appended-playlist continuation, and failure TTS. They cover all three song-search priorities while retaining local-first artist/playlist behavior. Evidence: `/tmp/songloft-522-{baseline-isolated,tests,typecheck,build,validate}.log` and `/tmp/songloft-522-verification.json`.
+- Rule: successful AI parameter extraction does not prove the executor supports external search. Verify each action's local-miss path and playback effects separately, rather than testing only `play_song` or the AI analysis endpoint. The topone fallback fetches one song candidate; it does not promise a complete external playlist or artist collection.
+- Not run: the reporter's lxserver/Subsonic topone, physical speaker audio, deployed-plugin upgrade, and long-running acceptance. Host interfaces are unchanged; there are no Go backend changes.
+- Seen 1× (2026-10-15). Status: lesson; verify deployment and physical-device acceptance separately.
+
 ### REL-001: Verify automatic releases with clean dependencies and matching source
 
 - Scope: per-commit mainline releases, date revisions, and publication recovery.

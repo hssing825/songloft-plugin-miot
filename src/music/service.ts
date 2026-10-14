@@ -678,7 +678,7 @@ export class MusicCommandService {
       if (locs.length > 0) {
         return { kind: 'song', found: true, detail: `歌手「${cleanArtist}」共 ${locs.length} 首歌曲（随机播放）` };
       }
-      return { kind: 'song', found: false, detail: `未找到歌手「${cleanArtist}」的歌曲` };
+      return { kind: 'song', found: false, detail: `未找到歌手「${cleanArtist}」的本地歌曲，将尝试外部搜索` };
     }
     if (type === 'play_playlist') {
       if (!(argument || '').trim()) {
@@ -688,10 +688,10 @@ export class MusicCommandService {
         return { kind: 'playlist', found: false, detail: '索引未就绪，无法预览搜索结果' };
       }
       const pl = await this.indexingManager.findPlaylistByNameWithRefresh(argument);
-      if (pl) {
+      if (pl && pl.songCount > 0) {
         return { kind: 'playlist', found: true, detail: `${pl.name}（${pl.songCount} 首）` };
       }
-      return { kind: 'playlist', found: false, detail: `未找到歌单「${argument}」` };
+      return { kind: 'playlist', found: false, detail: `歌单「${argument}」未命中或为空，将尝试外部搜索` };
     }
     return null;
   }
@@ -1037,6 +1037,8 @@ export class MusicCommandService {
   private async executePlayPlaylist(playlistName: string, accountId: string, deviceId: string): Promise<void> {
     this.cancelPendingResume(accountId, deviceId);
     const pm = await this.playlistManagerMap.getOrCreate(accountId, deviceId);
+    playlistName = playlistName.trim();
+    const hasExplicitName = playlistName.length > 0;
 
     // 空参数 + 有活跃歌单：直接恢复播放，无需搜索和打断
     if (!playlistName && pm.hasPlaylist()) {
@@ -1056,7 +1058,10 @@ export class MusicCommandService {
       songloft.log.warn('[MusicCommandService] Playlist index not ready, attempting on-demand refresh');
       const result = await this.indexingManager.refresh();
       if (!result.success || !this.indexingManager.isIndexReady()) {
-        songloft.log.warn('[MusicCommandService] Playlist index refresh failed, skip play playlist');
+        songloft.log.warn('[MusicCommandService] Playlist index refresh failed');
+        if (hasExplicitName) {
+          await this.playExternalFallback(playlistName, pm, accountId, deviceId, `未找到歌单：${playlistName}`);
+        }
         return;
       }
       songloft.log.info(`[MusicCommandService] Playlist index refreshed on-demand: playlists=${result.playlistCount} songs=${result.songCount}`);
@@ -1079,7 +1084,17 @@ export class MusicCommandService {
     if (!matchedPlaylist) {
       const indexStatus = this.indexingManager.getStatus();
       songloft.log.warn(`[MusicCommandService] Playlist not found: ${playlistName} (indexReady=${indexStatus.ready} playlists=${indexStatus.playlist_count} refreshing=${indexStatus.is_refreshing})`);
-      await this.minaService.textToSpeech(accountId, deviceId, `未找到歌单：${playlistName}`);
+      if (hasExplicitName) {
+        await this.playExternalFallback(playlistName, pm, accountId, deviceId, `未找到歌单：${playlistName}`);
+      } else {
+        await this.minaService.textToSpeech(accountId, deviceId, `未找到歌单：${playlistName}`);
+      }
+      return;
+    }
+
+    if (hasExplicitName && matchedPlaylist.songCount === 0) {
+      songloft.log.warn(`[MusicCommandService] Playlist is empty: ${playlistName}, trying external search`);
+      await this.playExternalFallback(playlistName, pm, accountId, deviceId, `歌单${playlistName}为空，外部搜索未找到可播放歌曲`);
       return;
     }
 
@@ -1287,8 +1302,7 @@ export class MusicCommandService {
 
     if (!(await this.indexingManager.waitForReady(INDEX_READY_WAIT_MS))) {
       songloft.log.warn('[MusicCommandService] Index not ready for play_artist');
-      await this.minaService.textToSpeech(accountId, deviceId, `索引未就绪，无法播放`);
-      return null;
+      return this.playExternalFallback(cleanArtist, pm, accountId, deviceId, `未找到歌手${cleanArtist}的歌曲`);
     }
 
     // findSongsByArtist 只遍历歌单歌曲缓存，缓存未就绪时必然返回空、被误报成
@@ -1298,8 +1312,7 @@ export class MusicCommandService {
     const artistLocs = this.indexingManager.findSongsByArtist(cleanArtist);
     if (artistLocs.length === 0) {
       songloft.log.warn(`[MusicCommandService] No songs found for artist: ${cleanArtist} (playlistCacheReady=${this.indexingManager.isPlaylistCacheReady()})`);
-      await this.minaService.textToSpeech(accountId, deviceId, `未找到歌手${cleanArtist}的歌曲`);
-      return null;
+      return this.playExternalFallback(cleanArtist, pm, accountId, deviceId, `未找到歌手${cleanArtist}的歌曲`);
     }
 
     songloft.log.info(`[MusicCommandService] play_artist: found ${artistLocs.length} songs for "${cleanArtist}"`);
@@ -1333,8 +1346,7 @@ export class MusicCommandService {
 
     if (fullSongs.length === 0) {
       songloft.log.warn(`[MusicCommandService] play_artist: no playable songs found for "${cleanArtist}"`);
-      await this.minaService.textToSpeech(accountId, deviceId, `加载歌手${cleanArtist}的歌曲失败`);
-      return null;
+      return this.playExternalFallback(cleanArtist, pm, accountId, deviceId, `加载歌手${cleanArtist}的歌曲失败，外部搜索未找到可播放歌曲`);
     }
 
     const startIndex = Math.floor(Math.random() * fullSongs.length);
@@ -1352,6 +1364,29 @@ export class MusicCommandService {
       songName: currentSong?.title || cleanArtist,
       artist: currentSong?.artist || cleanArtist,
     };
+  }
+
+  /** 本地歌手/歌单无结果时复用歌曲点播的外部搜索与播放路径，不重复打断音箱。 */
+  private async playExternalFallback(
+    keyword: string,
+    pm: PlaylistManager,
+    accountId: string,
+    deviceId: string,
+    failureText: string,
+  ): Promise<PlayedSong | null> {
+    songloft.log.warn(`[MusicCommandService] Local artist/playlist unavailable, trying external search: "${keyword}"`);
+    try {
+      // 歌手/歌单名称仅作 keyword，不伪装成具体歌名 hint，避免限制 topone 的候选。
+      const candidate = await this.findExternalSongCandidate(keyword, null);
+      if (candidate) {
+        const played = await this.playSongCandidate(candidate, pm, keyword, keyword, accountId, deviceId);
+        if (played) return played;
+      }
+    } catch (e) {
+      songloft.log.warn(`[MusicCommandService] External fallback failed for "${keyword}": ${String(e)}`);
+    }
+    await this.minaService.textToSpeech(accountId, deviceId, failureText);
+    return null;
   }
 
   private normalizeSearchPriority(priority: unknown): SearchPriority {

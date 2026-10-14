@@ -64,6 +64,7 @@ function createEngine(commands = defaults.getDefaultVoiceCommands()) {
   };
   engine.accountManager = { getAccounts: async () => [{ id: 'account' }] };
   engine.memoryService = { setMaxRecords: async () => { } };
+  engine.onlineSearcher = { isExternalSearchConfigured: async () => false };
   engine.playlistManagerMap = { get: () => undefined, cancelHourlyResumes: () => { } };
   engine.indexingManager = {
     waitForReady: async () => true,
