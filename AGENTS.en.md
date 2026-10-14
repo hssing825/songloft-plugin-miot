@@ -21,6 +21,8 @@ This is the development entry point for `songloft-org/songloft-plugin-miot`, cov
 
 ## Validation commands
 
+See [automatic releases](docs/en/releases.md): each mainline business commit gets a package using Beijing `YYYY.M.D.N`, normally resetting to `.0` on a new date; version commits do not recurse. Changes to release scripts require `node --test tests/release_pipeline.test.mjs` and checks for retry recovery and tag/source correspondence.
+
 Run in this repository:
 
 ```bash

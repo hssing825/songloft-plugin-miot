@@ -21,6 +21,8 @@
 
 ## 验证命令
 
+自动发布与每日版本序号见 [自动发布](docs/releases.md)：每个 main 业务提交单独出包，版本为北京时间 `YYYY.M.D.N`，正常换日从 `.0` 开始；版本提交不递归触发。更改发布脚本时运行 `node --test tests/release_pipeline.test.mjs`，核对失败续跑与 tag/源码对应关系。
+
 在本仓库执行：
 
 ```bash

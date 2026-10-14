@@ -10,6 +10,14 @@ Include rule, scope, full owner/repo#number, failure/fix commit SHAs, actual val
 
 ## Entries
 
+### REL-001: Verify automatic releases with clean dependencies and matching source
+
+- Scope: per-commit mainline releases, date revisions, and publication recovery.
+- Evidence: on 2026-10-14, local dependencies passed type checks, but `npm ci` in a temporary Git worktree installed SDK 2.15.0 from the old lockfile, missing `HTTPStream` / `net.httpStream`. Published SDK 2.17.0 still lacked them; pinning 2.18.0 passed the clean build, validation, 899 plugin tests and 64 frontend tests.
+- Done right: local Git remotes and real build rehearsals verified four-component packages, immutable tags, source markers and mainline metadata. Six release regressions cover batch pushes, arriving commits, day rollover, failed-check retry and published-package recovery. Allocate versions from existing tags, build each source in its own worktree, and omit CI-generated version commits from publication.
+- Rule: existing node_modules cannot prove the CI lockfile works. Never tag newer source for an older artifact. Three-component dates equal four-component `.0`, so migration begins at `.1`.
+- Seen 1× (2026-10-14). Status: lesson; policy in [Automatic releases](docs/en/releases.md).
+
 ### MIOT-005: Duration-mismatch protection must survive recovery timer rebuilds
 
 - Scope: voice, resume verification, hourly recovery, and tail checks when metadata and device stream duration disagree.
