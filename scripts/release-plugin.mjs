@@ -42,6 +42,10 @@ export function isVersionCommit(author, subject) {
   return author === 'github-actions[bot]' && subject.startsWith('chore(release): bump to v');
 }
 
+function hasPackageChanges(paths) {
+  return paths.some(path => !/^docs\//.test(path) && !/\.mdx?$/i.test(path));
+}
+
 export function releaseSource(body = '') {
   return /^Source commit: ([a-f0-9]{40})$/m.exec(body)?.[1];
 }
@@ -93,7 +97,8 @@ export function releasePending({ root, repository, toolchain, now = () => new Da
     git('merge-base', '--is-ancestor', base, 'origin/main');
     const pending = git('log', '--first-parent', '--reverse', '--format=%H%x09%an%x09%s', `${base}..origin/main`)
       .split('\n').filter(Boolean).map(line => line.split('\t'))
-      .filter(([, author, subject]) => !isVersionCommit(author, subject));
+      .filter(([source, author, subject]) => !isVersionCommit(author, subject) &&
+        hasPackageChanges(git('diff', '--name-only', '--no-renames', '-z', `${source}^`, source).split('\0').filter(Boolean)));
     if (!pending.length) break;
     const [source] = pending[0];
     // 发布成功、main 元数据写入失败时，重跑接回已发布包，不重复发同一提交。

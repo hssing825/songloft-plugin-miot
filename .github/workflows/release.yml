@@ -3,6 +3,10 @@ name: Release Plugin
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.mdx'
+      - 'docs/**'
   workflow_dispatch:
 
 permissions:

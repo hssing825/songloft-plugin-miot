@@ -28,7 +28,7 @@ test('only generated version commits are skipped and source markers are exact SH
   assert.equal(releaseSource('Source commit: main'), undefined);
 });
 
-function fixture(t) {
+function fixture(t, { documentation = false } = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'miot-release-test-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const remote = join(directory, 'remote.git'), sender = join(directory, 'sender'), root = join(directory, 'worker');
@@ -45,8 +45,19 @@ function fixture(t) {
     git('add', '.'); git('commit', '-m', text);
     return git('rev-parse', 'HEAD');
   };
+  const changeFile = (path, text) => {
+    const file = join(sender, path);
+    mkdirSync(join(file, '..'), { recursive: true });
+    if (text === null) rmSync(file); else writeFileSync(file, text);
+    git('add', '.'); git('commit', '-m', `docs: ${path}`);
+    return git('rev-parse', 'HEAD');
+  };
   commit('base'); git('tag', 'v2026.10.15'); git('push', 'origin', 'main', '--tags');
-  const first = commit('first'), second = commit('second'); git('push', 'origin', 'main');
+  const first = commit('first');
+  if (documentation) changeFile('docs/images/example.svg', '<svg/>');
+  const second = commit('second');
+  if (documentation) changeFile('README.md', 'Read me');
+  git('push', 'origin', 'main');
   execute('git', ['clone', '--branch', 'main', remote, root], directory);
   const releases = [], builds = [];
   let failPush = false, failBuild = false, appendCommit;
@@ -71,7 +82,7 @@ function fixture(t) {
     writeFileSync(join(snapshot, 'dist/miot.jsplugin.zip'), source);
   };
   const publish = () => releasePending({ root, repository: 'example/miot', run, build, now: () => new Date('2026-10-14T12:00:00Z') });
-  return { first, second, releases, builds, publish, root, git, execute, commit,
+  return { first, second, releases, builds, publish, root, git, execute, commit, changeFile,
     failPush: value => { failPush = value; }, failBuild: value => { failBuild = value; },
     append: callback => { appendCommit = callback; } };
 }
@@ -89,6 +100,34 @@ test('batch pushes and new commits during builds each get an immutable matching 
     assert.equal(JSON.parse(f.execute('git', ['show', `v${item.version}:plugin.json`], f.root)).version, item.version);
   }
   assert.deepEqual(f.publish(), [], 'queued reruns must not publish bot metadata commits');
+  assert.equal(f.releases.length, 3);
+});
+
+test('batch queue excludes documentation commits between code commits and at its tail', t => {
+  const f = fixture(t, { documentation: true });
+  const result = f.publish();
+  assert.deepEqual(result.map(item => item.source), [f.first, f.second]);
+  assert.deepEqual(result.map(item => item.version), ['2026.10.15.1', '2026.10.15.2']);
+  assert.equal(f.releases.length, 2);
+  assert.deepEqual(f.publish(), [], 'manual dispatch must not publish the documentation tail');
+});
+
+test('documentation-only additions and deletions use no revision and later code resumes normally', t => {
+  const f = fixture(t);
+  f.publish();
+  f.git('fetch', 'origin', 'main'); f.git('merge', '--ff-only', 'origin/main');
+  f.changeFile('README.MD', 'Only documentation');
+  f.changeFile('笔记.md', 'Localized documentation');
+  f.changeFile('docs/config.json', '{}');
+  f.git('push', 'origin', 'main');
+  assert.deepEqual(f.publish(), []);
+  f.changeFile('README.MD', null);
+  f.git('push', 'origin', 'main');
+  assert.deepEqual(f.publish(), []);
+  assert.equal(f.releases.length, 2);
+  const third = f.commit('third');
+  f.git('push', 'origin', 'main');
+  assert.deepEqual(f.publish(), [{ source: third, version: '2026.10.15.3' }]);
   assert.equal(f.releases.length, 3);
 });
 

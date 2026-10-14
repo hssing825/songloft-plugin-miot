@@ -1,6 +1,6 @@
 # Automatic releases
 
-Pushing to `main` runs Release Plugin, which builds each unpublished business commit in mainline order. Batch pushes and commits arriving during a build each receive a package. Generated `chore(release): bump to v...` commits do not produce another release. Manual workflow dispatch resumes unfinished commits.
+Pushing to `main` runs Release Plugin, which builds each unpublished non-documentation business commit in mainline order. Batch pushes and commits arriving during a build each receive a package unless they only change documentation. Commits changing only Markdown (`.md` / `.mdx`) or documents/assets under `docs/` produce no package and consume no revision. Mixed code or build-configuration changes still produce packages. Both workflow path filters and the pending-commit queue exclude documentation-only commits, so manual dispatch or a later code push never backfills them. Generated `chore(release): bump to v...` commits do not produce another release. Manual workflow dispatch resumes unfinished code commits.
 
 Versions use `YYYY.M.D.N` with Beijing dates. Normally the first package each day is `.0`; later packages increment the largest existing tag revision (`.9` is followed by `.10`). Tags include `v`; manifest versions omit it. Existing tags and Releases are preserved. Allocated revisions are never reused, so a failed publication may leave a gap.
 
@@ -16,4 +16,4 @@ Validate release logic locally:
 node --test tests/release_pipeline.test.mjs
 ```
 
-Tests use temporary local Git remotes and a mocked GitHub Release API. They cover day rollover, revisions, migration, batch pushes, commits arriving during builds, retry recovery, duplicate prevention, and tag/source correspondence without publishing to a real repository.
+Tests use temporary local Git remotes and a mocked GitHub Release API. They cover day rollover, revisions, migration, batch pushes, commits arriving during builds, skipped documentation additions/deletions, later code publication, retry recovery, duplicate prevention, and tag/source correspondence without publishing to a real repository.
