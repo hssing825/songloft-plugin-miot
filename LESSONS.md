@@ -27,6 +27,8 @@
 - 修复：本次修复在本地歌手无歌曲、歌曲无法加载、命名歌单未命中/为空或索引未就绪时，使用解析后的名称作为外部搜索 keyword，复用 `findExternalSongCandidate` / `playSongCandidate`。不将歌手/歌单名伪装成歌曲 title hint，不重复 prepare/stop；本地命中仍保留随机歌手队列/原歌单，空参数保留默认歌单和恢复语义。
 - Done right：37 项新增回归在隔离基线副本下有 22 项因预期行为失败，修复后全部通过；全量 938 项、类型检查、QuickJS 构建及包校验通过。测试使用真实 `OnlineSearcher` 和模拟 HTTP/音箱接口，断言 keyword、导入后实际播放 URL、单次打断、增量索引、不入库直推、追加歌单续播及失败 TTS；覆盖三种歌曲搜索优先级，歌手/歌单的本地优先行为保持不变。证据在 `/tmp/songloft-522-{baseline-isolated,tests,typecheck,build,validate}.log` 与 `/tmp/songloft-522-verification.json`。
 - 规则：AI 参数解析成功不代表执行器具备外部搜索；分别验证每个动作的本地未命中路径及播放副作用，不能只测 `play_song` 或 AI 分析端点。topone 回退只获取一个歌曲候选，不承诺加载完整外部歌单或歌手合集。
+- 同日后续反馈：[真实 LX06 复测](https://github.com/songloft-org/songloft/issues/522#issuecomment-6182633128) 确认 v2026.10.15.4 的外部回退能播放，但 AI 超时返回 null 仍无提示，AI 歌名中的空格也会令 topone 漏命中。基线 `2b9c8b1aba0cd2867c530c916418df9e3757f7e0` 仍有这两条路径；原执行器回归没有覆盖解析失败和关键词变体。修复后解析失败给出重试提示，有聊天接手时不重复播报；外部关键词及 hint 先压缩空白，仅明确未命中时去空白重试一次，共用源超时并保留优先级。
+- 后续验证：Linux amd64 / Node 22.17.1，本次未提交工作树新增 38 项回归；75 项专项检查（含原 37 项）在隔离旧源码下有 27 项因预期行为失败，修复后全通过。1025 项插件测试、64 项前端测试、类型检查、QuickJS 构建与包校验通过。覆盖真实分析器超时/网络/无效响应到 dispatcher 的提示、聊天分流/追问过期、取消与提示失败后的续播，以及三种搜索策略下变体命中后的单次导入和播放 URL。证据在 `/tmp/songloft-522-followup/`，代码标识见 `verification.json`。自动化不代表报告人真机已验收；此为同日同 Issue 补充，不增加 Seen。
 - Not run：报告人的 lxserver/Subsonic topone、真实音箱发声、已部署插件升级与长期运行；本次未修改宿主接口，无 Go 后端变更。
 - Seen 1× (2026-10-15)。状态：经验；实际部署与真机验收单独核实。
 

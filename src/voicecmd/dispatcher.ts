@@ -93,10 +93,11 @@ export class VoiceDispatcher {
     try {
       if (!current())
         return;
-      const handled = await this.music.handleMessage(message, { deferResume: true, current });
+      const canChatFallback = () => config.enabled && (config.fallback_enabled || active.followup_until > Date.now() || ['queued', 'preparing', 'generating', 'speaking', 'resuming'].includes(active.phase));
+      const handled = await this.music.handleMessage(message, { deferResume: true, current, suppressAnalysisFailureHint: canChatFallback });
       if (!current() || handled)
         return;
-      if (config.enabled && (config.fallback_enabled || active.followup_until > Date.now() || ['queued', 'preparing', 'generating', 'speaking', 'resuming'].includes(active.phase))) {
+      if (canChatFallback()) {
         await this.chat.submit(account, device, text, true, current);
         return;
       }

@@ -55,6 +55,7 @@ function fixture(t, options = {}) {
     requests.push({ url, body });
     if (url.endsWith('/search')) {
       if (options.searchError) throw new Error('source unavailable');
+      if (options.whitespaceMiss && /\s/.test(body.keyword)) return { status: 200, text: async () => JSON.stringify({ code: 404, data: null }) };
       return { status: 200, text: async () => JSON.stringify({ code: 0, data: options.miss || (options.firstMiss && url.includes('topone')) ? null : song }) };
     }
     if (url === 'http://host/api/v1/songs/remote') {
@@ -93,6 +94,8 @@ function fixture(t, options = {}) {
     waitForPlaylistCache: async () => true,
     isPlaylistCacheReady: () => true,
     findSongsByArtist: () => options.artistLocs || [],
+    findSongByName: async () => null,
+    findStandaloneSongByName: async () => null,
     findPlaylistByNameWithRefresh: async () => options.playlist || null,
     searchPlaylist: () => options.defaults || [],
     getStatus: () => ({ ready: true, playlist_count: 0, is_refreshing: false }),
@@ -224,3 +227,25 @@ test('search preview explains the external fallback without executing it', async
   }
   assert.deepEqual(f.requests, []);
 });
+
+for (const priority of ['local_first', 'external_first', 'parallel']) {
+  for (const entry of ['ai', 'rule']) {
+    test(`${entry} play_song imports and pushes after whitespace retry (${priority})`, async t => {
+      const f = fixture(t, { priority, whitespaceMiss: true });
+      const name = '山峰山峰等等我 男生合唱版';
+      if (entry === 'ai') {
+        await f.engine.executeAIResult({ action: 'play_song', params: { name }, confidence: 'high' }, 'account', 'speaker');
+      } else {
+        await f.engine.executeCommand({ command: { type: 'play_song' }, keyword: '播放', argument: name }, 'account', 'speaker');
+      }
+      const searches = f.requests.filter(r => r.url.endsWith('/search'));
+      assert.equal(searches.length, 4);
+      assert.deepEqual(searches.slice(2).map(r => r.body), [0, 1].map(() => ({ keyword: name.replace(/\s/g, ''), hint: { title: name.replace(/\s/g, '') }, quality: '320k' })));
+      assert.equal(f.requests.filter(r => r.url.endsWith('/songs/remote')).length, 1);
+      assert.equal(f.pushes[0][2], 'http://host/api/v1/songs/42/play');
+      assert.deepEqual(f.speech, []);
+      assert.equal(f.events.filter(e => e === 'prepare').length, 1);
+      assert.equal(f.events.filter(e => e === 'stop').length, 1);
+    });
+  }
+}

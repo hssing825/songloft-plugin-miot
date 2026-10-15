@@ -8,6 +8,10 @@ Configure the provider, API URL, key, and default model in **Settings → AI Set
 
 The default Chinese prefixes are “请问” and “问一下”. A successful answer opens a 60-second follow-up window; follow-ups still require waking the speaker. Fixed music controls take priority. Music rules, song memory, and AI command analysis handle recognized music requests; playback failures do not turn them into chat. Optionally enable fallback chat for unmatched music commands. Otherwise, questions outside the window continue to use the speaker's native assistant.
 
+When enabled AI command analysis returns no result after a timeout, network failure, or response parsing failure, the speaker says “暂时没能识别这条指令，请再说一次” (unable to recognize this command; please try again). Unmatched-message smart resume remains available. If fallback chat, a valid follow-up window, or an ongoing answer will handle the message, it goes directly to chat without this extra hint. Requests cancelled by newer actions cannot speak late.
+
+External song searches first collapse consecutive whitespace in the keyword and title/artist hints to single spaces. Only an explicit miss (successful HTTP response with business `code=404` or `code=0,data=null`) triggers one retry with whitespace removed. A first-attempt hit retains English word boundaries. Both attempts share the source's configured timeout and preserve source priority; network, authentication, and server errors do not trigger this retry.
+
 “停止回答”, “退出对话”, and “结束对话” cancel the answer and close the window, optionally restoring music after a safe stop. “停止播放” keeps music stopped. New questions invalidate old tasks so late model responses cannot speak.
 
 ## Speech and Music Recovery

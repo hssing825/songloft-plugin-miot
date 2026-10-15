@@ -38,6 +38,13 @@ interface MatchResult {
   argument: string;
 }
 
+interface MessageOptions {
+  deferResume?: boolean;
+  current?: () => boolean;
+  /** 聊天会接手未匹配消息时，由聊天链路反馈失败。 */
+  suppressAnalysisFailureHint?: () => boolean;
+}
+
 /**
  * 独立歌曲候选：不在任何歌单里的歌，由 findStandaloneSongByName 经 songs.getById 拿到完整字段。
  * type 决定电台转码是否生效、duration 决定能否注册自动切歌定时器，两者都不能丢
@@ -254,7 +261,7 @@ export class MusicCommandService {
    * 处理新对话消息（由 ConversationMonitor 回调触发）
    * @param msg - 对话消息
    */
-  async handleMessage(msg: ConversationMessage, options: { deferResume?: boolean; current?: () => boolean } = {}): Promise<boolean> {
+  async handleMessage(msg: ConversationMessage, options: MessageOptions = {}): Promise<boolean> {
     if (options.current) {
       this.getVoiceResume(); this.getSleepTimers();
       const request: MusicCommandService = Object.create(this);
@@ -267,7 +274,7 @@ export class MusicCommandService {
     return this.processMessage(msg, options);
   }
 
-  private async processMessage(msg: ConversationMessage, options: { deferResume?: boolean; current?: () => boolean }): Promise<boolean> {
+  private async processMessage(msg: ConversationMessage, options: MessageOptions): Promise<boolean> {
     // 从 AskMessage 中提取 query
     const query = this.extractQuery(msg);
     if (!query || query.trim() === '') {
@@ -354,6 +361,14 @@ export class MusicCommandService {
         songloft.log.info(`[MusicCommandService] [AI] → No fallback execution (action=${aiResult.action}, confidence=${aiResult.confidence})`);
       } else {
         songloft.log.info(`[MusicCommandService] [AI] → No fallback execution (analyze returned null)`);
+        if (!options.suppressAnalysisFailureHint?.()) {
+          try {
+            await this.minaService.textToSpeech(accountId, msg.device_id, '暂时没能识别这条指令，请再说一次', options.current);
+          } catch (error) {
+            songloft.log.warn(`[MusicCommandService] AI failure hint failed: ${String(error)}`);
+          }
+          if (options.current?.() === false) return false;
+        }
       }
     }
 

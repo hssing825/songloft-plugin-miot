@@ -192,6 +192,11 @@ export class OnlineSearcher {
     keyword: string,
     hint: { title: string; artist?: string; duration?: number } | null,
   ): Promise<OnlineSearchResult | null> {
+    // 保留正常词间空格；去空白变体仅在源明确未命中后尝试。
+    const normalize = (value: string): string => value.replace(/\s+/g, ' ').trim();
+    keyword = normalize(keyword);
+    if (!keyword) return null;
+    hint = hint ? { ...hint, title: normalize(hint.title), ...(hint.artist !== undefined ? { artist: normalize(hint.artist) } : {}) } : null;
     const sources = await this.getEnabledSources();
     if (sources.length === 0) return null;
 
@@ -215,7 +220,8 @@ export class OnlineSearcher {
   }
 
   /**
-   * 向单个源发起一次搜索。内部处理超时/网络错/解析失败，全部返回 null，绝不 reject。
+   * 向单个源搜索，明确未命中时最多重试一次去空白变体。
+   * 内部处理超时/网络错/解析失败，全部返回 null，绝不 reject。
    */
   private async searchOne(
     source: ExternalSearchSource,
@@ -229,33 +235,58 @@ export class OnlineSearcher {
       quality: '320k',
     };
 
-    let resp: SearchOneResponse | null = null;
+    const compactBody: SearchOneRequest = {
+      ...reqBody,
+      keyword: keyword.replace(/\s+/g, ''),
+      hint: hint ? {
+        ...hint,
+        title: hint.title.replace(/\s+/g, ''),
+        ...(hint.artist !== undefined ? { artist: hint.artist.replace(/\s+/g, '') } : {}),
+      } : undefined,
+    };
+    const hasVariant = JSON.stringify(compactBody) !== JSON.stringify(reqBody);
+    let finished = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
 
-    // 带超时的 fetch（用 Promise.race 替代 AbortController，兼容 QuickJS）
+    // 两次尝试共用一个期限，包含地址解析、认证、fetch 和响应体读取。
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('AbortError')), timeoutMs);
+      timer = setTimeout(() => { finished = true; reject(new Error('AbortError')); }, timeoutMs);
     });
-
     try {
-      const baseUrl = await this.resolveSourceUrl(source);
-      if (!baseUrl) return null;
-      const authToken = await this.resolveSourceToken(source);
-      songloft.log.info('[OnlineSearcher] [Diag] Request POST ' + baseUrl + ' body=' + JSON.stringify(reqBody));
-      const fetchPromise = fetch(baseUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: authToken },
-        body: JSON.stringify(reqBody),
-      });
-      const fetchResp = await Promise.race([fetchPromise, timeoutPromise]);
-
-      const text = await fetchResp.text();
-      songloft.log.info('[OnlineSearcher] [Diag] Response status=' + fetchResp.status + ' body=' + text);
-      try {
-        resp = JSON.parse(text) as SearchOneResponse;
-      } catch {
-        songloft.log.warn('[OnlineSearcher] Failed to parse search/topone response: ' + text);
+      const request = (async (): Promise<OnlineSearchResult | null> => {
+        const baseUrl = await this.resolveSourceUrl(source);
+        if (!baseUrl || finished) return null;
+        const authToken = await this.resolveSourceToken(source);
+        const attempts = hasVariant ? [reqBody, compactBody] : [reqBody];
+        for (let i = 0; i < attempts.length; i++) {
+          if (finished) return null;
+          const body = attempts[i];
+          if (i > 0) songloft.log.info('[OnlineSearcher] Retrying whitespace-free keyword: ' + body.keyword);
+          songloft.log.info('[OnlineSearcher] [Diag] Request POST ' + baseUrl + ' body=' + JSON.stringify(body));
+          const fetchResp = await fetch(baseUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: authToken },
+            body: JSON.stringify(body),
+          });
+          if (finished) return null;
+          const text = await fetchResp.text();
+          if (finished) return null;
+          songloft.log.info('[OnlineSearcher] [Diag] Response status=' + fetchResp.status + ' body=' + text);
+          let resp: SearchOneResponse | null;
+          try {
+            resp = JSON.parse(text) as SearchOneResponse;
+          } catch {
+            songloft.log.warn('[OnlineSearcher] Failed to parse search/topone response: ' + text);
+            return null;
+          }
+          if (resp?.code === 0 && resp.data) return resp.data;
+          songloft.log.warn('[OnlineSearcher] Search/topone returned code=' + (resp?.code ?? 'null') + ' for keyword: ' + body.keyword);
+          // 仅业务未命中重试；认证、服务端错误和网络失败不加倍请求。
+          if (fetchResp.status < 200 || fetchResp.status >= 300 || !(resp?.code === 404 || resp?.code === 0 && !resp.data)) return null;
+        }
         return null;
-      }
+      })();
+      return await Promise.race([request, timeoutPromise]);
     } catch (e: any) {
       if (e.message === 'AbortError') {
         songloft.log.warn(`[OnlineSearcher] Search/topone timeout (>${timeoutMs / 1000}s) for source "${source.name || source.url}" keyword: ` + keyword);
@@ -263,15 +294,10 @@ export class OnlineSearcher {
         songloft.log.warn('[OnlineSearcher] Search/topone fetch error: ' + String(e));
       }
       return null;
+    } finally {
+      finished = true;
+      if (timer !== undefined) clearTimeout(timer);
     }
-
-    // 解析响应
-    if (!resp || resp.code !== 0 || !resp.data) {
-      songloft.log.warn('[OnlineSearcher] Search/topone returned code=' + (resp?.code ?? 'null') + ' for keyword: ' + keyword);
-      return null;
-    }
-
-    return resp.data;
   }
 
   /**
