@@ -340,6 +340,8 @@ export class PlaylistManager {
   private checkTimerFallbackDeadlineMs: number = 0; // 提前校验拿不到结束证据时，仍等原有截止时间
   private checkTimerGeneration: number = 0; // 每次清理定时器递增，使在途查询在同曲重播/续播后失效
   private stopPollTimer: any = null;    // 定时器ID（后台探测外部停止，见 EXTERNAL_STOP_* 常量）
+  private stopPollScheduleVersion: number = 0;
+  private stopPollFastConfirmationUsed: boolean = false;
   private stopPollMisses: number = 0;   // 连续探测到设备"未在播放"的次数
   private stopPollLastPosition: number = -1; // 上次探测读到的设备流内位置（秒），-1 = 还没有基线
   private stopPollMaxPosition: number = 0; // 外部停止探测期间见过的最大设备流内位置（秒），
@@ -2862,13 +2864,44 @@ export class PlaylistManager {
    * 「调度间隔」递减、不计 getPlayState 的云端查询耗时，导致 stop-poll 比墙钟慢约 10%，
    * 漏进尾部 15s 窗口与 tail-probe 竞态。改读 deadline 后准时停(#114)。
    */
-  private scheduleStopPoll(): void {
+  private async scheduleStopPoll(): Promise<void> {
+    const scheduleVersion = ++this.stopPollScheduleVersion;
+    const generation = this.checkTimerGeneration;
+    if (this.stopPollTimer !== null) clearTimeout(this.stopPollTimer);
+    this.stopPollTimer = null;
+    let hourlyEnabled = false;
+    try {
+      hourlyEnabled = (await this.configManager.getConfig()).hourly_chime_resume_enabled === true;
+    } catch (e) {
+      songloft.log.warn('[PlaylistManager] Stop poll config unavailable: ' + String(e));
+    }
+    // 配置查询也可能跨过暂停、换歌或重新校准，不能注册旧流的探测。
+    if (scheduleVersion !== this.stopPollScheduleVersion || generation !== this.checkTimerGeneration ||
+      this.state !== 'playing' || this.isVoiceSuspended() || this.isHourlyResumePending()) return;
     const remainingMs = this.stopPollDeadlineMs - Date.now();
     if (remainingMs <= 0) return;
-    const wait = Math.min(EXTERNAL_STOP_POLL_INTERVAL_MS, remainingMs);
+    let interval = EXTERNAL_STOP_POLL_INTERVAL_MS;
+    let verify = false;
+    const song = this.getCurrentSong();
+    if (hourlyEnabled && this.playbackConfirmed && !this.externalPlayback && song?.type !== 'radio') {
+      const now = new Date(Date.now());
+      const sinceHour = (now.getMinutes() * 60 + now.getSeconds()) * 1000 + now.getMilliseconds();
+      const hour = now.getTime() - sinceHour;
+      if (sinceHour < HOURLY_RESUME_WINDOW_MS && hour !== this.lastHourlyResumeHour) {
+        // 报时没有对话事件。先缩短发现中断的等待；仍须设备证据，不按整点直接重推。
+        verify = this.stopPollMisses === 1 && !this.stopPollFastConfirmationUsed;
+        interval = verify ? HOURLY_RESUME_FAST_POLL_MS : HOURLY_RESUME_POLL_MS;
+      } else {
+        const nextHour = new Date(now);
+        nextHour.setHours(nextHour.getHours() + 1, 0, 0, 0);
+        interval = Math.min(interval, nextHour.getTime() - now.getTime());
+      }
+    }
+    const wait = Math.min(interval, remainingMs);
     this.stopPollTimer = setTimeout(() => {
       this.stopPollTimer = null;
-      this.checkExternalStop().catch(e => {
+      if (verify) this.stopPollFastConfirmationUsed = true;
+      this.checkExternalStop(verify).catch(e => {
         songloft.log.warn('[PlaylistManager] checkExternalStop error: ' + String(e));
       });
     }, wait);
@@ -2884,7 +2917,7 @@ export class PlaylistManager {
    * 推进，说明设备其实在播，按 status 误报处理并清零计数
    * （见 EXTERNAL_STOP_POSITION_ADVANCE_MIN_SEC）。
    */
-  private async checkExternalStop(): Promise<void> {
+  private async checkExternalStop(verify: boolean = false): Promise<void> {
     if (this.state !== 'playing' || this.isHourlyResumePending()) return;
     const indexAtCheck = this.currentIndex;
     const generationAtCheck = this.checkTimerGeneration;
@@ -2893,7 +2926,7 @@ export class PlaylistManager {
       this.checkTimerGeneration === generationAtCheck;
 
     try {
-      const st = await this.minaService.getPlayState(this.accountId, this.deviceId);
+      const st = await this.minaService.getPlayState(this.accountId, this.deviceId, verify ? { verify: true } : {});
       if (!isCurrent()) return;
       if (cancelVersion !== this.hourlyResumeCancelVersion) {
         this.scheduleStopPoll();
@@ -2917,7 +2950,7 @@ export class PlaylistManager {
           this.stopPollResumePosition = null;
         } else if (isDeviceIdle(status) || (status === 1 && stream === 'foreign')) {
           const advanced = hasPosition && stream !== 'foreign' && this.stopPollLastPosition >= 0 &&
-            position - this.stopPollLastPosition >= EXTERNAL_STOP_POSITION_ADVANCE_MIN_SEC;
+            position - this.stopPollLastPosition >= (verify ? TAIL_STALL_ADVANCE_MIN_SEC : EXTERNAL_STOP_POSITION_ADVANCE_MIN_SEC);
           this.stopPollLastPosition = hasPosition && stream !== 'foreign' ? position : -1;
           if (advanced) {
             songloft.log.info(`[PlaylistManager] External stop ignored: status=${status} but position advanced to ${position}s, device still playing`);
@@ -2995,7 +3028,8 @@ export class PlaylistManager {
       songloft.log.warn('[PlaylistManager] checkExternalStop query failed: ' + String(e));
     }
 
-    if (isCurrent() && Date.now() < this.stopPollDeadlineMs) this.scheduleStopPoll();
+    if (this.stopPollMisses === 0) this.stopPollFastConfirmationUsed = false;
+    if (isCurrent() && Date.now() < this.stopPollDeadlineMs) void this.scheduleStopPoll();
   }
 
   isHourlyResumePending(): boolean {
@@ -3007,6 +3041,12 @@ export class PlaylistManager {
     if (deviceId && !this.targets.some(t => t.device_id === deviceId)) return;
     // 配置/设备状态查询仍在等待时也要失效，不能等任务建好才取消。
     this.hourlyResumeCancelVersion++;
+    if (this.stopPollMisses > 0) {
+      // 新对话接手后，快速探测不能把同一轮旧中断重新建成报时恢复任务。
+      const now = new Date(this.stopPollFirstStopAtMs || Date.now());
+      this.lastHourlyResumeHour = now.getTime() -
+        (now.getMinutes() * 60 + now.getSeconds()) * 1000 - now.getMilliseconds();
+    }
     this.clearHourlyResume(true);
   }
 
@@ -3145,6 +3185,7 @@ export class PlaylistManager {
       this.stopPollTimer = null;
     }
     this.stopPollMisses = 0;
+    this.stopPollFastConfirmationUsed = false;
     this.stopPollLastPosition = -1;
     this.stopPollLastSampleAt = -1;
     this.stopPollResumePosition = null;

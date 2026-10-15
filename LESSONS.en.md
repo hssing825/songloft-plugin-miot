@@ -10,6 +10,17 @@ Include rule, scope, full owner/repo#number, failure/fix commit SHAs, actual val
 
 ## Entries
 
+### MIOT-008: Measure recovery latency before interruption detection starts
+
+- Scope: hourly-chime interruption detection, shared status samples, and recovery cancellation, songloft-org/songloft#481.
+- Evidence: on 2026-10-15, [the reporter confirmed normal transitions in v2026.10.15.5 but still waited 20–30 seconds after chimes](https://github.com/songloft-org/songloft/issues/481#issuecomment-6185288909). The log confirms installation at 09:14:26; hourly recovery is created only at 11:00:34.234 / 13:00:29.414, with repush acknowledgments at 11:00:38.232 / 13:00:33.412. The log lacks exact announcement-end timestamps and complete probe samples, so the entire time from the hour to repush cannot be labeled post-announcement silence.
+- Root cause: at plugin baseline `2aeb4102b31a76af4812e02487bd3fe22c344b21`, recovery tasks were already faster, but discovery still required two background polls spaced 20 seconds apart. Earlier regressions started timing after the second poll, omitting the main wait. All 12 new full-path cases fail on an isolated old manager because repush is late.
+- Fix: this working tree uses five-second shared probes only during the first 90 seconds of the server-local hour when hourly recovery is enabled, aligning the preceding poll to the hour. The first suspected interruption permits one one-second confirmation. Repeated cached samples do not accumulate evidence, and failures preserve Mina backoff. Progress still overrides misleading idle status. Asynchronous config reads check playback generations; cancellation by a new dialogue cannot recreate the same old chime task. Disabled, outside-window, and already-handled hours retain ordinary polling.
+- Done right: 24 focused cases cover real MinaHTTPClient/MinaService code, both push APIs, with/without status polling, seek and three speeds. With simulated half-second cloud responses and an eight-second announcement, repush completes 7.69–8.5 seconds after speech ends; the next two actual track URLs are then sent, without failure markers, TTS, or timers left after cleanup. Other cases cover normal progress, advancing progress with idle misreports, long speech, repeated caches, failure backoff, opt-out/outside-window behavior, and cancellation during config reads. All 1049 plugin tests, 64 frontend tests, type checks, QuickJS build/package validation, parent Go playback/Range/timer tests, and full checks pass. Evidence is in `/tmp/songloft-481-20261015/`; `verification.json` identifies code and environment.
+- Rule: measure user latency from interruption/speech completion through discovery, caching, confirmation, and commands. Fast local recovery does not prove a short user wait. Bounded confirmation must not become continuous backoff bypass; verify normal progress, cancellation, and subsequent natural transitions together.
+- Not run: audible L15A playback, the reporter's original audio, installed firmware/backend SHA, and long-running acceptance. Simulated latency does not promise matching device latency. Code delivery, release availability, and device acceptance are verified separately.
+- Seen 1× (2026-10-15). Status: lesson; physical-device retesting remains pending.
+
 ### MIOT-007: End-of-stream rewind detection must cover the shared sampling interval
 
 - Scope: tail probes, deadline verification, and timer deferral for the same stream with known song duration.

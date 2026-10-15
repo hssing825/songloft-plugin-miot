@@ -2175,6 +2175,246 @@ test('cached idle samples and failed queries cannot confirm an external stop', a
   });
 });
 
+// Exercise the entire hourly detection delay, including real Mina caching and cloud latency.
+for (const api of ['music', 'url']) {
+  for (const statusPage of [false, true]) {
+    for (const speed of [0.5, 1, 2]) {
+      test(`issue 481 hourly detection: prompt recovery with ${api}, statusPage=${statusPage}, speed=${speed}`, async t => {
+        await withClock(async h => {
+          const hour = new Date(Date.now());
+          hour.setMinutes(0, 0, 0);
+          hour.setHours(hour.getHours() + 1);
+          const hourAt = hour.getTime();
+          await h.advance(hourAt - Date.now() - 7310);
+          const config = { hourly_chime_resume_enabled: true, smart_resume_timeout: 30 };
+          const client = new MinaHTTPClient({ user_id: 'test', device_id: 'test', services: {} });
+          const service = new MinaService({ getMinaClient: () => client }, {
+            getConfig: async () => ({ music_api_model_disabled: api === 'url' ? ['L15A'] : [] }),
+          });
+          service.getDeviceIdentity = async () => ({ hardware: 'L15A' });
+          const pushed = [];
+          const queries = [];
+          const operations = [];
+          let streamAt = Date.now() - 100000;
+          let seek = 30;
+          let recovered = false;
+          const { manager, tts } = player({
+            config, mode: 'order', service: {
+              playURL: (...args) => service.playURL(...args),
+              resumePlay: (...args) => service.resumePlay(...args),
+              getPlayState: (...args) => service.getPlayState(...args),
+              getPlayerStatus: (...args) => service.getPlayerStatus(...args),
+            }
+          });
+          client.doUbusRequest = async (_device, method, _path, message) => {
+            if (method === 'player_get_play_status') {
+              queries.push(Date.now());
+              const chime = !recovered && Date.now() >= hourAt;
+              const speaking = chime && Date.now() < hourAt + 8000;
+              const info = chime
+                ? { status: speaking ? 1 : 3 }
+                : {
+                  status: 1, play_song_detail: {
+                    position: (Date.now() - streamAt), duration: (300 - seek) / speed * 1000,
+                  }
+                };
+              await new Promise(resolve => setTimeout(resolve, 500));
+              return { code: 0, data: { info: JSON.stringify(info) } };
+            }
+            await new Promise(resolve => setTimeout(resolve, 500));
+            if (method === 'player_play_operation') operations.push(message.action);
+            if (method === 'player_play_music' || method === 'player_play_url') {
+              assert.equal(method, api === 'music' ? 'player_play_music' : 'player_play_url');
+              const url = method === 'player_play_music' ? JSON.parse(message.music).payload.audio_items[0].stream.url : message.url;
+              pushed.push({ url, at: Date.now() });
+              seek = Number(new URL(url).searchParams.get('seek') || 0);
+              streamAt = Date.now();
+              recovered = true;
+            }
+            return { code: 0, data: { code: 0 } };
+          };
+          manager.streamSeekOffsetSec = seek;
+          manager.playbackSpeed = speed;
+          manager.playStartTimeMs = streamAt - seek / speed * 1000;
+          manager.streamStartedAtMs = streamAt;
+          manager.playbackConfirmed = true;
+          manager.resetAutoNextTimer(manager.getPosition(), false);
+          let statusTimer;
+          let polling = statusPage;
+          const pollStatus = async () => {
+            await resolvePlayerStatus({ getOrCreate: async () => manager }, manager.minaService, 'account', 'speaker');
+            if (polling) statusTimer = setTimeout(pollStatus, 1000);
+          };
+          updateDeviceStatusCache('account', 'speaker', { timestamp: 0 });
+          if (statusPage) void pollStatus();
+          await flush();
+          await h.advance(hourAt + 8000 - Date.now() - 1);
+          assert.equal(pushed.length, 0, 'do not interrupt the hourly announcement');
+          await h.advance(10001);
+          assert.equal(pushed.length, 1, 'recover within ten seconds of the idle device instead of two 20s polls');
+          t.diagnostic(`simulated repush ${pushed[0].at - hourAt - 8000}ms after announcement ended`);
+          assert.equal(manager.currentIndex, 0);
+          assert.ok(pushed[0].url.includes('/songs/16/play'));
+          const expectedPosition = 30 + (hourAt - (hourAt - 7310 - 100000)) / 1000 * speed;
+          assert.equal(Number(new URL(pushed[0].url).searchParams.get('seek')), Math.floor(expectedPosition));
+          assert.ok(!operations.includes('play'), 'missing media should be repushed without a bare resume');
+          assert.equal(queries.filter(at => at >= hourAt && at <= pushed[0].at).length <= 9, true);
+          assert.ok(manager.checkTimer !== null);
+          // Complete two natural transitions after recovery; no skipped song, failure marker, or TTS.
+          for (let index = 0; index < 2; index++) {
+            const endAt = streamAt + (300 - seek) / speed * 1000;
+            await h.advance(endAt - Date.now() - 1);
+            assert.equal(manager.currentIndex, index);
+            await h.advance(5001);
+            assert.equal(manager.currentIndex, index + 1);
+            assert.equal(pushed.length, index + 2);
+            assert.ok(pushed[index + 1].url.includes(`/songs/${songs[index + 1].id}/play`));
+          }
+          assert.equal(manager.unplayableSongs.size, 0);
+          assert.deepEqual(tts, []);
+          polling = false;
+          if (statusTimer !== undefined) clearTimeout(statusTimer);
+          manager.cleanup();
+          assert.equal(h.timers.size, 0);
+        });
+      });
+    }
+  }
+}
+
+for (const scenario of ['playing', 'misreported idle with progress', 'long announcement', 'cloud failure', 'cached idle']) {
+  test(`issue 481 hourly detection: no false repush during ${scenario}`, async () => {
+    await withClock(async h => {
+      const hour = new Date(Date.now());
+      hour.setMinutes(0, 0, 0);
+      hour.setHours(hour.getHours() + 1);
+      await h.advance(hour.getTime() - Date.now());
+      const queries = [];
+      const config = { hourly_chime_resume_enabled: true };
+      const { manager, pushes, tts } = player({
+        config, service: {
+          getPlayState: async (_account, _device, options) => {
+            queries.push({ at: Date.now(), verify: options?.verify });
+            const moving = scenario === 'playing' || scenario === 'misreported idle with progress';
+            return {
+              status: scenario === 'cloud failure' ? -1 : moving ? scenario === 'playing' ? 1 : 2 : scenario === 'long announcement' ? 1 : 3,
+              position: moving ? 120 + (Date.now() - hour.getTime()) / 1000 : 0,
+              duration: moving ? 300 : 0, hasPosition: moving,
+              sampledAt: scenario === 'cached idle' ? hour.getTime() : Date.now(),
+            };
+          },
+        }
+      });
+      manager.playbackConfirmed = true;
+      manager.playStartTimeMs = Date.now() - 120000;
+      manager.resetAutoNextTimer(120, false);
+      await flush();
+      await h.advance(100000);
+      assert.equal(pushes.length, 0);
+      assert.equal(manager.currentIndex, 0);
+      assert.equal(manager.unplayableSongs.size, 0);
+      assert.deepEqual(tts, []);
+      if (scenario === 'misreported idle with progress') assert.equal(manager.isHourlyResumePending(), false);
+      if (scenario === 'cloud failure') assert.equal(queries.filter(q => q.verify).length, 0, 'failures must never bypass Mina backoff');
+      if (scenario === 'cached idle') assert.ok(queries.filter(q => q.verify).length <= 1, 'one stale confirmation cannot start a repeated fast-query loop');
+      manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+test('issue 481 hourly detection: real Mina backoff survives a failed fast confirmation', async () => {
+  await withClock(async h => {
+    const hour = new Date(Date.now());
+    hour.setMinutes(0, 0, 0);
+    hour.setHours(hour.getHours() + 1);
+    await h.advance(hour.getTime() - Date.now());
+    const client = new MinaHTTPClient({ user_id: 'test', device_id: 'test', services: {} });
+    const service = new MinaService({ getMinaClient: () => client }, {});
+    const queries = [];
+    client.doUbusRequest = async () => {
+      queries.push(Date.now());
+      return queries.length === 1 ? { code: 0, data: { info: JSON.stringify({ status: 3 }) } } : null;
+    };
+    const { manager, pushes } = player({
+      config: { hourly_chime_resume_enabled: true }, service: {
+        getPlayState: (...args) => service.getPlayState(...args),
+      }
+    });
+    manager.playbackConfirmed = true;
+    manager.playStartTimeMs = Date.now() - 120000;
+    manager.resetAutoNextTimer(120, false);
+    await flush();
+    await h.advance(80000);
+    assert.equal(queries.length, 4);
+    assert.deepEqual(queries.map(at => at - hour.getTime()), [5000, 6000, 11000, 71000]);
+    assert.equal(manager.isHourlyResumePending(), false);
+    assert.equal(pushes.length, 0);
+    manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+for (const [enabled, second] of [[false, 0], [true, 100]]) {
+  test(`issue 481 hourly detection: ordinary stop cadence with enabled=${enabled}, second=${second}`, async () => {
+    await withClock(async h => {
+      const hour = new Date(Date.now());
+      hour.setMinutes(0, 0, 0);
+      hour.setHours(hour.getHours() + 1);
+      await h.advance(hour.getTime() + second * 1000 - Date.now());
+      const queries = [];
+      const { manager, pushes } = player({
+        config: { hourly_chime_resume_enabled: enabled }, service: {
+          getPlayState: async (_account, _device, options) => {
+            queries.push({ at: Date.now(), verify: options?.verify });
+            return { status: 3, hasPosition: false, position: 0, duration: 0, sampledAt: Date.now() };
+          },
+        }
+      });
+      manager.playbackConfirmed = true;
+      manager.playStartTimeMs = Date.now() - 120000;
+      manager.resetAutoNextTimer(120, false);
+      await flush();
+      await h.advance(19999);
+      assert.equal(queries.length, 0);
+      await h.advance(1);
+      assert.equal(queries.length, 1);
+      assert.equal(manager.state, 'playing');
+      await h.advance(20000);
+      assert.equal(queries.length, 2);
+      assert.equal(queries.some(q => q.verify), false);
+      assert.equal(manager.state, 'stopped');
+      assert.equal(pushes.length, 0);
+      manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+for (const action of ['pause', 'stop', 'new song', 'cleanup']) {
+  test(`issue 481 hourly detection: delayed config cannot schedule an old probe after ${action}`, async () => {
+    await withClock(async h => {
+      const pending = deferred();
+      const { manager } = player();
+      manager.playbackConfirmed = true;
+      manager.playStartTimeMs = Date.now() - 120000;
+      manager.configManager.getConfig = () => pending.promise;
+      manager.resetAutoNextTimer(120, false);
+      if (action === 'pause') await manager.pause();
+      else if (action === 'stop') await manager.stop();
+      else if (action === 'new song') manager.initWithSongs(songs, 1, 'order', 2);
+      else manager.cleanup();
+      const count = h.timers.size;
+      pending.resolve({ hourly_chime_resume_enabled: true });
+      await flush();
+      assert.equal(h.timers.size, count);
+      assert.equal(manager.stopPollTimer, null);
+      manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
 async function hourlySession(h, { enabled = true, readState, readConfig, resumeResult = true, duration = 300, second = 10, seek = 0, speed = 1 } = {}) {
   const hour = new Date(Date.now());
   hour.setMinutes(0, 0, 0);
@@ -2203,7 +2443,13 @@ async function hourlySession(h, { enabled = true, readState, readConfig, resumeR
   s.manager.playbackConfirmed = true;
   s.manager.stopPollDeadlineMs = Date.now() + 120000;
   await s.manager.checkExternalStop();
+  await flush();
+  // These tests isolate recovery after detection; full poll timing is tested above.
+  clearTimeout(s.manager.stopPollTimer);
+  s.manager.stopPollTimer = null;
   await h.advance(20000);
+  void s.manager.checkExternalStop();
+  await flush();
   return { ...s, config, resumes };
 }
 
@@ -2616,7 +2862,8 @@ for (const reloadStatus of [-1, 1]) {
       await manager.resumeAfterReload({
         state: 'playing', positionSec: 150, atMs: Date.now(), songId: 16, seekOffsetSec: 0,
       });
-      await h.advance(40000);
+      // Inspect the detection stage before recovery is sent (the enabled window now polls sooner).
+      await h.advance(reloadStatus === 1 ? 6000 : 40000);
       assert.equal(manager.isSongUnplayable(16), false);
       assert.equal(pushes.length, 0);
       assert.equal(tts.length, 0);
