@@ -17,7 +17,7 @@ const message = {
   message: { response: { answer: [{ question: '来点适合现在听的音乐' }] } },
 };
 
-function fixture(t, { chat = {}, active = {}, ttsError = false, playing = false } = {}) {
+function fixture(t, { chat = {}, active = {}, ttsError = false, playing = false, ai = {} } = {}) {
   t.mock.method(globalThis, 'fetch', async () => { throw new Error('network unavailable'); });
   const previous = globalThis.songloft;
   globalThis.songloft = { log: { info() { }, warn() { }, error() { } } };
@@ -31,7 +31,7 @@ function fixture(t, { chat = {}, active = {}, ttsError = false, playing = false 
   const config = { ...DEFAULT_CHAT_CONFIG, ...chat };
   engine.configManager = {
     getConfig: async () => ({ voice_memory_enabled: false }),
-    getAIConfig: async () => ({ enabled: true, api_url: 'https://model.test/v1', api_key: 'fixture', model: 'fixture', timeout: 15 }),
+    getAIConfig: async () => ({ enabled: true, api_url: 'https://model.test/v1', api_key: 'fixture', model: 'fixture', timeout: 15, ...ai }),
     getChatConfig: async () => config,
     getVoiceCommands: async () => [],
   };
@@ -151,5 +151,89 @@ for (const analysis of [null, { action: 'unknown', confidence: 'low', params: {}
     else f.engine.configManager.getAIConfig = async () => ({ enabled: false });
     await f.dispatcher.dispatch(message, '来点适合现在听的音乐', () => true);
     assert.deepEqual(f.speech, []);
+  });
+}
+
+function conversation(question) {
+  return { ...message, message: { response: { answer: [{ question }] } } };
+}
+
+for (const failure of ['timeout', 'network', 'malformed', 'empty']) {
+  for (const query of ['打开客厅灯', '关灯', '现在几点啦', '今天天气怎么样', '准备睡觉', '把空调调到二十六度']) {
+    for (const entry of ['dispatcher', 'legacy']) {
+      test(`${entry}: AI ${failure} leaves XiaoAI request silent: ${query}`, async t => {
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        const f = fixture(t, { playing: true });
+        if (failure === 'timeout') t.mock.method(globalThis, 'fetch', () => new Promise(() => { }));
+        if (failure === 'malformed') t.mock.method(globalThis, 'fetch', async () => Response.json({ choices: [{ message: { content: 'invalid' } }] }));
+        if (failure === 'empty') t.mock.method(globalThis, 'fetch', async () => Response.json({ choices: [] }));
+        const msg = conversation(query);
+        const pending = entry === 'dispatcher'
+          ? f.dispatcher.dispatch(msg, query, () => true)
+          : f.engine.handleMessage(msg);
+        await flush();
+        if (failure === 'timeout') t.mock.timers.tick(15000);
+        await pending;
+        assert.deepEqual(f.speech, []);
+        assert.deepEqual(f.events, ['suspend', 'resume']);
+      });
+    }
+  }
+}
+
+for (const query of ['来点适合现在听的音乐', '来一首晴天', '放几首周杰伦的歌', '听两首轻松的歌', '播放周杰伦的歌曲', '放个轻松的歌单', '播放刘德华', '播放山峰山峰等等我男生合唱版']) {
+  test(`explicit music request keeps the AI failure hint: ${query}`, async t => {
+    const f = fixture(t);
+    await f.dispatcher.dispatch(conversation(query), query, () => true);
+    assert.equal(f.speech.length, 1);
+    assert.deepEqual(f.events, []);
+  });
+}
+
+for (const ai of [{ api_url: '' }, { api_key: '' }]) {
+  test(`incomplete AI connection does not claim recognition failure: ${JSON.stringify(ai)}`, async t => {
+    const f = fixture(t, { ai, playing: true });
+    const requests = [];
+    t.mock.method(globalThis, 'fetch', async (...args) => { requests.push(args); throw new Error('unexpected request'); });
+    await f.dispatcher.dispatch(message, '来点适合现在听的音乐', () => true);
+    assert.deepEqual(requests, []);
+    assert.deepEqual(f.speech, []);
+    assert.deepEqual(f.events, ['suspend', 'resume']);
+  });
+}
+
+test('unmatched XiaoAI request without music playing stays silent and idle', async t => {
+  const f = fixture(t);
+  await f.dispatcher.dispatch(conversation('几点啦'), '几点啦', () => true);
+  assert.deepEqual(f.speech, []);
+  assert.deepEqual(f.events, []);
+});
+
+test('ambiguous input stays silent on AI failure but still permits successful AI music analysis', async t => {
+  const f = fixture(t);
+  const msg = conversation('晴天');
+  await f.dispatcher.dispatch(msg, '晴天', () => true);
+  assert.deepEqual(f.speech, []);
+  const executed = [];
+  f.engine.executeAIResult = async result => { executed.push(result); };
+  const result = { action: 'play_song', params: { name: '晴天' }, confidence: 'high' };
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ choices: [{ message: { content: JSON.stringify(result) } }] }));
+  await f.dispatcher.dispatch(msg, '晴天', () => true);
+  assert.equal(executed.length, 1);
+  assert.equal(executed[0].action, 'play_song');
+  assert.deepEqual(executed[0].params, { name: '晴天' });
+  assert.deepEqual(f.speech, []);
+});
+
+for (const [name, chat, active] of [
+  ['fallback', { enabled: true, fallback_enabled: true }, {}],
+  ['followup', { enabled: true }, { followup_until: Date.now() + 60000 }],
+  ['answer in progress', { enabled: true }, { phase: 'speaking' }],
+]) {
+  test(`non-music request still reaches configured chat: ${name}`, async t => {
+    const f = fixture(t, { chat, active });
+    await f.dispatcher.dispatch(conversation('现在几点啦'), '现在几点啦', () => true);
+    assert.deepEqual(f.speech, []);
+    assert.deepEqual(f.events, ['chat']);
   });
 }

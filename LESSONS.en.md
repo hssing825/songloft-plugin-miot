@@ -10,6 +10,15 @@ Include rule, scope, full owner/repo#number, failure/fix commit SHAs, actual val
 
 ## Entries
 
+### MIOT-009: Scope AI failure speech in a passive conversation listener
+
+- Scope: AI command fallback in `MusicCommandService` and routing in `VoiceDispatcher`.
+- Evidence: On 2026-10-16, investigation of [songloft-org/songloft#526](https://github.com/songloft-org/songloft/issues/526) found a report of v2026.10.15.7 adding recognition failure speech after smart-home controls and time questions. The attachment records “开灯” / “现在几点了” entering analysis and immediately returning null at 19:26:15 / 19:28:06 on 2026-10-15. It does not record the full failure-hint TTS text, so logs alone do not prove audible speech. The null-result hint added by `26388d4` for #522 did not distinguish music requests from ordinary XiaoAI requests; an incomplete analysis connection also returns null.
+- Fix: Baseline `7f311a1c26add93d75a061f396b95dffcd904912` plus this working tree only speaks the hint when the analysis connection is configured, the text has playback/song-request cues, and chat will not take over. Cues limit failure speech only, preserving successful AI analysis and execution. Ambiguous failures stay silent, with smart resume and cancellation protection preserved. See [AI chat](docs/ai-chat.md).
+- Done right: Of the final 77 focused checks, 52 fail against isolated old source because of unwanted speech; all pass after the fix. All 1126 plugin tests, type checking, QuickJS build, and package validation pass. Coverage includes both message entry paths, lights/time/weather/scenes/air conditioning, four analysis failure modes, missing connections, explicit music requests, chat routing, cancellation, and resume. Environment: Linux x86_64 / Node 22.17.1. Evidence: `/tmp/songloft-526/verification.json` and adjacent logs.
+- Not run: The reporter's physical speaker, smart-home actions, audible speech, or long-duration operation. No frontend or host API changes; browser interactions and parent Go tests were not run. Check commits, releases, and actual upgrades separately.
+- Seen 1× (2026-10-16). Status: lesson; locally fixed, physical-device verification pending.
+
 ### MIOT-008: Measure recovery latency before interruption detection starts
 
 - Scope: hourly-chime interruption detection, shared status samples, and recovery cancellation, songloft-org/songloft#481.

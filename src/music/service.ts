@@ -150,6 +150,11 @@ const FIXED_CONTROL_COMMAND_TYPES = new Set(['set_play_mode', 'set_volume', 'fav
 const SEARCH_COMMAND_TYPES = new Set(['play_song', 'play_playlist', 'play_artist']);
 const BUILTIN_STOP_KEYWORDS = ['暂停播放', '停止播放', '暂停音乐', '停一下', 'pause', 'stop', '暂停'];
 
+/** 只为有明确音乐请求线索的分析失败播报提示；未识别的普通请求仍交给小爱。 */
+function hasMusicRequestCue(query: string): boolean {
+  return /播放|点播|(?:听|播|放|来)[^，。！？!?]*(?:音乐|歌曲|歌单|专辑)|(?:来|放|播|听)(?:一|两|几|[0-9]+)首/.test(query);
+}
+
 /**
  * 有界跳字子序列匹配：在 query 的 rune 数组中按序查找关键词，允许中间插入有限字符。
  *
@@ -361,7 +366,7 @@ export class MusicCommandService {
         songloft.log.info(`[MusicCommandService] [AI] → No fallback execution (action=${aiResult.action}, confidence=${aiResult.confidence})`);
       } else {
         songloft.log.info(`[MusicCommandService] [AI] → No fallback execution (analyze returned null)`);
-        if (!options.suppressAnalysisFailureHint?.()) {
+        if (aiConfig.api_url && aiConfig.api_key && hasMusicRequestCue(query) && !options.suppressAnalysisFailureHint?.()) {
           try {
             await this.minaService.textToSpeech(accountId, msg.device_id, '暂时没能识别这条指令，请再说一次', options.current);
           } catch (error) {
