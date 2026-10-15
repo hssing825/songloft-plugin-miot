@@ -10,6 +10,16 @@ Include rule, scope, full owner/repo#number, failure/fix commit SHAs, actual val
 
 ## Entries
 
+### MIOT-007: End-of-stream rewind detection must cover the shared sampling interval
+
+- Scope: tail probes, deadline verification, and timer deferral for the same stream with known song duration.
+- Evidence: on 2026-10-15, the user supplied `songloft-logs-20261015-081219.zip`, confirming the update to `2026.10.15.4` at 07:23:55. At 07:30:20 the device froze at 174.160/174.322 seconds; at 07:30:26 its position was already 7.501 seconds, yet the plugin logged `looped=false`. Manual next requests occurred at 07:30:42 and 07:37:52; two other transitions waited approximately thirty seconds for the grace timeout. Timers did fire; this is not evidence of lost timer handles or a missing upgrade.
+- Cause and fix: baseline `e5ad196fa365c4ebf28807ee888b74fe4437d531` only detects resets within the first three seconds, shorter than the five-second shared sampling interval plus cloud latency. Fractional-tail deferral also clears the tail baseline. This fix retains adjacent fresh samples and detects replay only with matching, stable stream duration, a previous position within two seconds of the longer duration, at most ten seconds between samples, and a reset position consistent with that interval. Evidence survives only deadline deferral for the same stream; replacement streams, pause, suspension, playlist changes, stop, takeover, and query failure clear it.
+- Done right: 18 of 25 focused regressions fail for missing timely advancement in an isolated baseline copy; all pass after the fix. Twelve use the real Mina shared cache, MinaService, and Music API/direct-URL command construction with simulated half-second cloud responses, covering status-page presence/absence, seek, three speeds, and two consecutive actual next-song URLs. Another 24 exercise the real `/player/seek` handler for dragging from the tail to the start/middle, playing/paused state, pending old queries, and subsequent natural advancement. All 987 plugin tests, 64 frontend tests, type checking, QuickJS build, package validation, host playback/Range/timer regressions, and `CGO_ENABLED=0 make check` pass. Evidence: `/tmp/songloft-miot-20261015-081219/`.
+- Rule: validate detection windows against actual sampling cadence, rather than merely increasing a fixed reset threshold. Manual seek must create a new stream and invalidate old tail evidence; assert both no premature advancement and normal subsequent completion.
+- Not run: physical speaker audio, original recordings, and long-running acceptance. Seeking in external players such as the Xiaoai app does not notify the plugin; identical sampling traces cannot reliably distinguish that action from natural replay. This change does not alter that external-control boundary.
+- Seen 1× (2026-10-15). Status: local fix and simulated integration validation pass; deployment and physical-device acceptance remain pending.
+
 ### MIOT-006: Artist and playlist playback need external search after a local miss
 
 - Scope: rule and AI execution of `play_artist` / `play_playlist`.

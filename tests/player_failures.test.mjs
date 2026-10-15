@@ -25,6 +25,14 @@ const http = {
 };
 const urls = loadSource('../src/player/url_builder.ts', { '../utils/http': http });
 const deviceState = loadSource('../src/playback/device_state.ts', {});
+const minaConstants = loadSource('../src/mina/constants.ts', { '../data/tts-commands.json': {} });
+const { MinaHTTPClient } = loadSource('../src/mina/client.ts', {
+  '../utils/cookie': {}, '../utils/http': {}, '../utils/crypto': {},
+  '../utils/debug': { isDebugLog: () => false }, './constants': minaConstants, '../miio/client': {},
+});
+const { MinaService } = loadSource('../src/service/service.ts', {
+  '../mina/auth': {}, '../mina/constants': minaConstants,
+});
 const players = loadSource('../src/player/manager.ts', {
   '../playback/device_state': deviceState,
   '../config/manager': { playlistProgressScope: () => 'account:speaker' },
@@ -34,7 +42,10 @@ const players = loadSource('../src/player/manager.ts', {
 });
 const { PlaylistManager, PlaylistManagerMap, UNPLAYABLE_SONG_TTL_MS } = players;
 const { registerPlaylistHandlers, resolvePlayerStatus, updateDeviceStatusCache } = loadSource('../src/handlers/playlist.ts', {
-  '@songloft/plugin-sdk': { jsonResponse: value => value },
+  '@songloft/plugin-sdk': {
+    jsonResponse: value => value,
+    parseQuery: query => Object.fromEntries(new URLSearchParams(query)),
+  },
   '../player/manager': players,
   '../config/manager': {},
   '../utils/http': http,
@@ -148,6 +159,161 @@ function player({ mode = 'loop', config = {}, service = {}, initialSongs = songs
   manager.initWithSongs(initialSongs, 0, mode, 1);
   manager.state = 'playing';
   return { manager, pushes, tts };
+}
+
+for (const api of ['music', 'url']) {
+  for (const withStatusPage of [false, true]) {
+    for (const speed of [0.5, 1, 2]) {
+      test(`log 20261015: consecutive fractional tails advance with real ${api} commands, speed=${speed}, statusPage=${withStatusPage}`, async () => {
+        await withClock(async h => {
+          const metadata = [174, 184, 189];
+          const streamDurations = [174.322, 184.052, 189.532].map(value => value / speed);
+          const client = new MinaHTTPClient({ user_id: 'test', device_id: 'test', services: {} });
+          const service = new MinaService({ getMinaClient: () => client }, {
+            getConfig: async () => ({ music_api_model_disabled: api === 'url' ? ['LX05'] : [] }),
+          });
+          service.getDeviceIdentity = async () => ({ hardware: 'LX05' });
+          const pushed = [];
+          let streamStartedAt = Date.now();
+          let seek = 30;
+          const { manager, tts } = player({
+            mode: 'order', initialSongs: songs.map((song, i) => ({ ...song, duration: metadata[i] })),
+            service: {
+              playURL: (...args) => service.playURL(...args),
+              getPlayState: (...args) => service.getPlayState(...args),
+              getPlayerStatus: (...args) => service.getPlayerStatus(...args),
+            },
+          });
+          client.doUbusRequest = async (_device, method, _path, message) => {
+            if (method === 'player_get_play_status') {
+              const duration = streamDurations[manager.currentIndex] - seek / speed;
+              const elapsed = (Date.now() - streamStartedAt) / 1000;
+              // Like the log, freeze just short of the fractional end, then loop before the next shared sample.
+              const position = elapsed >= duration + 1 ? elapsed - duration - 1 : Math.min(elapsed, duration - 0.162);
+              await new Promise(resolve => setTimeout(resolve, 500));
+              return { code: 0, data: { info: JSON.stringify({
+                status: 1, volume: 30, play_song_detail: { position: position * 1000, duration: duration * 1000 },
+              }) } };
+            }
+            if (method === 'player_play_music' || method === 'player_play_url') {
+              assert.equal(method, api === 'music' ? 'player_play_music' : 'player_play_url');
+              const url = method === 'player_play_music' ? JSON.parse(message.music).payload.audio_items[0].stream.url : message.url;
+              pushed.push(url);
+              seek = Number(new URL(url).searchParams.get('seek') || 0);
+              streamStartedAt = Date.now();
+            }
+            return { code: 0, data: { code: 0 } };
+          };
+          let statusTimer;
+          let statusActive = withStatusPage;
+          const pollStatus = async () => {
+            await resolvePlayerStatus({ getOrCreate: async () => manager }, manager.minaService, 'account', 'speaker');
+            if (statusActive) statusTimer = setTimeout(pollStatus, 1000);
+          };
+          updateDeviceStatusCache('account', 'speaker', { timestamp: 0 });
+          assert.equal(await manager.playCurrent({ seekSeconds: seek, speed }), true);
+          if (withStatusPage) await pollStatus();
+          for (let index = 0; index < 2; index++) {
+            const endAt = streamStartedAt + (streamDurations[index] - seek / speed + 1) * 1000;
+            await h.advance(endAt - Date.now() - 1);
+            assert.equal(manager.currentIndex, index, 'do not cut the original audio before its end');
+            await h.advance(10001);
+            assert.equal(manager.currentIndex, index + 1, 'advance after the first fresh replay sample instead of the grace timeout');
+            assert.equal(pushed.length, index + 2);
+            assert.ok(pushed[index + 1].includes(`/songs/${songs[index + 1].id}/play`));
+            assert.ok(manager.checkTimer !== null);
+            assert.equal(manager.state, 'playing');
+            assert.equal(manager.unplayableSongs.size, 0);
+            assert.deepEqual(tts, []);
+          }
+          statusActive = false;
+          if (statusTimer !== undefined) clearTimeout(statusTimer);
+          manager.cleanup();
+          assert.equal(h.timers.size, 0);
+        });
+      });
+    }
+  }
+}
+
+for (const position of [0, 60]) {
+  for (const speed of [0.5, 1, 2]) {
+    for (const paused of [false, true]) {
+      for (const probe of ['deadline', 'tail']) {
+        test(`manual seek to ${position}s at speed=${speed}, paused=${paused} ignores old ${probe} loop evidence`, async () => {
+          await withClock(async h => {
+            let slow;
+            let soughtAt;
+            const { manager, pushes, tts } = player({
+              mode: 'order',
+              service: {
+                pausePlayVerified: async () => 'paused',
+                getPlayState: async () => slow ? slow.promise : {
+                  status: 1, hasPosition: true,
+                  duration: (300 - (soughtAt === undefined ? 0 : position)) / speed,
+                  position: soughtAt === undefined ? 299.8 / speed : (Date.now() - soughtAt) / 1000,
+                  sampledAt: Date.now(),
+                },
+              },
+            });
+            assert.equal(await manager.playCurrent({ speed }), true);
+            clearTimeout(manager.tailProbeTimer);
+            manager.tailProbeTimer = null;
+            await manager.tailProbe();
+            assert.ok(manager.tailLoopSample, 'the old stream has sampled near its end');
+            slow = deferred();
+            if (probe === 'tail') {
+              clearTimeout(manager.tailProbeTimer);
+              manager.tailProbeTimer = null;
+            }
+            const pending = probe === 'deadline' ? manager.verifyTimerDeadline() : manager.tailProbe();
+            await flush();
+            const late = slow;
+            slow = undefined;
+            soughtAt = Date.now();
+            if (paused) manager.state = 'paused';
+            const map = new PlaylistManagerMap({}, {});
+            map.managers.set('account:speaker', manager);
+            const routes = new Map();
+            registerPlaylistHandlers({ post: (path, handler) => routes.set(path, handler), get() { } }, map, {}, {});
+            const result = await routes.get('/player/seek')({
+              body: JSON.stringify({ account_id: 'account', device_id: 'speaker', position }),
+            });
+            assert.equal(result.success, true, result.error);
+            assert.equal(result.data.position, position);
+            assert.equal(manager.tailLoopSample, null, 'manual seek starts a new stream without old tail evidence');
+            late.resolve({ status: 1, position: 7, duration: 300 / speed, hasPosition: true, sampledAt: Date.now() });
+            await pending;
+            await flush();
+            assert.equal(manager.tailLoopSample, null, 'late old-stream result cannot restore its loop evidence');
+            assert.equal(pushes.length, 2);
+            assert.ok(pushes[1].includes('/songs/16/play'));
+            assert.equal(Number(new URL(pushes[1]).searchParams.get('seek') || 0), position);
+            assert.equal(manager.currentIndex, 0);
+            assert.equal(manager.state, paused ? 'paused' : 'playing');
+            await h.advance(10000);
+            assert.equal(pushes.length, 2, 'dragging backward must not be mistaken for a natural loop');
+            if (!paused) {
+              const endAt = soughtAt + (300 - position) / speed * 1000;
+              await h.advance(endAt - Date.now() - 1);
+              assert.equal(manager.currentIndex, 0);
+              await h.advance(1001);
+              assert.equal(manager.currentIndex, 1, 'the sought stream still advances after its own natural end');
+              assert.equal(pushes.length, 3);
+              assert.ok(pushes[2].includes('/songs/17/play'));
+              assert.ok(manager.checkTimer !== null);
+            } else {
+              assert.equal(manager.checkTimer, null);
+            }
+            assert.equal(manager.unplayableSongs.size, 0);
+            assert.deepEqual(tts, []);
+            manager.cleanup();
+            assert.equal(h.timers.size, 0);
+          });
+        });
+      }
+    }
+  }
 }
 
 // Log samples from songloft-org/songloft#495, including the stream resumed at seek=112.
@@ -279,6 +445,7 @@ for (const operation of ['pause', 'voice suspension', 'same-song restart', 'next
       const pending = manager.verifyTimerDeadline();
       await flush();
       const queryTimers = new Set([...h.timers.keys()].filter(id => !timersBeforeQuery.has(id)));
+      manager.tailLoopSample = { position: 299.8, duration: 300, sampledAt: Date.now() };
       if (operation === 'pause') await manager.pause();
       else if (operation === 'voice suspension') manager.suspendForVoiceInteraction();
       else if (operation === 'same-song restart') await manager.replayCurrent();
@@ -289,6 +456,7 @@ for (const operation of ['pause', 'voice suspension', 'same-song restart', 'next
       else if (operation === 'stop') await manager.stop(false);
       else manager.cleanup();
       assert.equal(manager.deadlineTailEvidence, null);
+      assert.equal(manager.tailLoopSample, null);
       assert.equal(manager.matchResumeDeviceStream({ status: 1, duration: 500 }),
         ['pause', 'voice suspension'].includes(operation) ? 'ours' : 'foreign');
       const timers = [...h.timers.keys()];
@@ -297,6 +465,7 @@ for (const operation of ['pause', 'voice suspension', 'same-song restart', 'next
       await pending;
       await flush();
       assert.equal(manager.deadlineTailEvidence, null);
+      assert.equal(manager.tailLoopSample, null);
       assert.equal(pushes.length, pushCount);
       assert.deepEqual([...h.timers.keys()], timers.filter(id => !queryTimers.has(id)));
       manager.cleanup();

@@ -376,6 +376,7 @@ export class PlaylistManager {
   private deadlineSampleAtMs: number = -1;
   private deadlineGraceDeadlineMs: number = 0;
   private deadlineTailEvidence: DeadlineTailEvidence | null = null;
+  private tailLoopSample: { position: number; duration: number; sampledAt: number } | null = null;
   // 已由连续尾部采样确认的当前流特征；恢复身份使用，不能当作准确时长/结束证据。
   private confirmedTailStream: { songId: number; seek: number; speed: number; duration: number } | null = null;
   private devicePositionObserved: boolean = false; // 当前流曾收到有效进度，软续播保留、重新推流清空
@@ -1556,6 +1557,7 @@ export class PlaylistManager {
     this.devicePositionObserved = false;
     this.confirmedTailStream = null;
     this.deadlineTailEvidence = null;
+    this.tailLoopSample = null;
     this.songs = songs;
     this.totalSongs = songs.length;
     this.currentIndex = (startIndex >= 0 && startIndex < songs.length) ? startIndex : 0;
@@ -1573,6 +1575,7 @@ export class PlaylistManager {
     this.devicePositionObserved = false;
     this.confirmedTailStream = null;
     this.deadlineTailEvidence = null;
+    this.tailLoopSample = null;
     this.songs = songs;
     this.totalSongs = songs.length;
     this.currentIndex = 0;
@@ -2399,6 +2402,31 @@ export class PlaylistManager {
       : song.duration;
   }
 
+  /** 五秒共享采样可能错过回零的前三秒；用相邻新采样确认尾部到流开头的回拨。 */
+  private observeTailLoop(st: DevicePlayState): boolean {
+    const sampleAt = st.sampledAt ?? Date.now();
+    const previous = this.tailLoopSample;
+    if (previous && sampleAt <= previous.sampledAt) return false;
+    if (this.isVoiceSuspended() || st.status !== 1 || !st.hasPosition ||
+      !Number.isFinite(st.position) || st.position < 0 || !Number.isFinite(st.duration) ||
+      this.matchDeviceStream(st) !== 'ours') {
+      this.tailLoopSample = null;
+      return false;
+    }
+    this.tailLoopSample = { position: st.position, duration: st.duration, sampledAt: sampleAt };
+    if (!previous || Math.abs(previous.duration - st.duration) > 1) return false;
+    const song = this.getCurrentSong();
+    if (!song) return false;
+    const duration = Math.max(st.duration, (song.duration - this.streamSeekOffsetSec) / this.playbackSpeed);
+    const remaining = duration - previous.position;
+    const elapsed = (sampleAt - previous.sampledAt) / 1000;
+    // 只扩展流长匹配的相邻尾部采样。中途回拨、长时间断采样和流长失准仍保留原有保护。
+    return remaining >= -TAIL_STALL_NEAR_END_SEC && remaining <= TAIL_STALL_NEAR_END_SEC &&
+      elapsed > 0 && elapsed <= (DEADLINE_QUERY_WAIT_MS + DEADLINE_RETRY_MS) / 1000 &&
+      elapsed + 1 >= remaining && previous.position - st.position >= LOOP_DETECT_MIN_ADVANCE_SEC &&
+      st.position <= elapsed + LOOP_DETECT_RESET_THRESHOLD_SEC;
+  }
+
   /** 流长失准时，尾部连续进度只证明还在播放，不能用元数据截止时间证明结束。 */
   private observeDeadlineTail(st: DevicePlayState, sampleAt: number, fresh: boolean): { advancing: boolean; ended: boolean } {
     const result = { advancing: false, ended: false };
@@ -2517,7 +2545,8 @@ export class PlaylistManager {
         if (this.state !== 'playing' || this.currentIndex !== indexAtCheck || this.checkTimerGeneration !== generationAtCheck) return;
         this.recordDevicePosition(st);
         const validPosition = st.hasPosition && Number.isFinite(st.position) && st.position >= 0;
-        const looped = maxPosition >= LOOP_DETECT_MIN_ADVANCE_SEC && st.position < LOOP_DETECT_RESET_THRESHOLD_SEC;
+        const looped = this.observeTailLoop(st) ||
+          (maxPosition >= LOOP_DETECT_MIN_ADVANCE_SEC && st.position < LOOP_DETECT_RESET_THRESHOLD_SEC);
         const advancing = lastPosition >= 0 && st.position > lastPosition;
         const stillPlaying = st.status === 1 || (st.status >= 0 && advancing);
         const progressedSinceDeadline = this.deadlineLastPosition < 0 || st.position > this.deadlineLastPosition;
@@ -2556,11 +2585,13 @@ export class PlaylistManager {
           this.playStartTimeMs = Date.now() - devicePosition / this.playbackSpeed * 1000;
           const samplePosition = this.deadlineSamplePosition;
           const sampleTime = this.deadlineSampleAtMs;
+          const loopSample = this.tailLoopSample;
           this.startCheckTimer(remaining / this.playbackSpeed);
           this.checkTimerFallbackDeadlineMs = Math.max(this.checkTimerFallbackDeadlineMs, fallbackAtCheck);
           this.deadlineLastPosition = st.position;
           this.deadlineSamplePosition = samplePosition;
           this.deadlineSampleAtMs = sampleTime;
+          this.tailLoopSample = loopSample;
           this.tailProbeMaxPosition = Math.max(maxPosition, st.position);
           songloft.log.info(`[PlaylistManager] Timer deferred: devicePosition=${devicePosition.toFixed(1)}s remaining=${remaining.toFixed(1)}s speed=${this.playbackSpeed}`);
           return;
@@ -2569,6 +2600,7 @@ export class PlaylistManager {
       } catch (e) {
         if (this.state !== 'playing' || this.currentIndex !== indexAtCheck || this.checkTimerGeneration !== generationAtCheck) return;
         this.deadlineSamplePosition = -1;
+        this.tailLoopSample = null;
         if (this.deadlineTailEvidence?.confirmed) {
           this.deadlineTailEvidence.interrupted = true;
           this.deadlineTailEvidence.stopHits = 0;
@@ -2733,6 +2765,7 @@ export class PlaylistManager {
       const devicePos = st.position >= 0
         ? st.position * this.playbackSpeed + this.streamSeekOffsetSec
         : -1;
+      const sampledLoop = this.observeTailLoop(st);
 
       if (st.sampledAt !== undefined && st.sampledAt <= this.tailProbeLastSampleAt) {
         // 缓存只供展示，重复读取不累加 stopped 命中或停滞时间，也不重锚主定时器。
@@ -2743,8 +2776,10 @@ export class PlaylistManager {
         if (st.position > this.tailProbeMaxPosition) this.tailProbeMaxPosition = st.position;
 
         // 判据 1：循环回零（复用兜底探测同源阈值）
-        if (this.tailProbeMaxPosition >= LOOP_DETECT_MIN_ADVANCE_SEC && st.position < LOOP_DETECT_RESET_THRESHOLD_SEC) {
-          this.triggerTailAdvance(`loop detected (stream position reset ${this.tailProbeMaxPosition.toFixed(1)}s→${st.position.toFixed(1)}s, seek=${this.streamSeekOffsetSec}s)`, indexAtCheck);
+        if (sampledLoop || (this.tailProbeMaxPosition >= LOOP_DETECT_MIN_ADVANCE_SEC && st.position < LOOP_DETECT_RESET_THRESHOLD_SEC)) {
+          const rewind = sampledLoop ? `sampled tail rewind to ${st.position.toFixed(1)}s`
+            : `stream position reset ${this.tailProbeMaxPosition.toFixed(1)}s→${st.position.toFixed(1)}s`;
+          this.triggerTailAdvance(`loop detected (${rewind}, seek=${this.streamSeekOffsetSec}s)`, indexAtCheck);
           return;
         }
 
@@ -2790,6 +2825,7 @@ export class PlaylistManager {
       }
     } catch (e) {
       if (this.checkTimerGeneration !== generationAtCheck) return;
+      this.tailLoopSample = null;
       this.tailProbeLastPosition = -1;
       this.tailProbeStallStartedAtMs = null;
       this.tailProbeStopMisses = 0;
@@ -3136,6 +3172,7 @@ export class PlaylistManager {
     this.deadlineSampleAtMs = -1;
     this.deadlineGraceDeadlineMs = 0;
     this.deadlineTailEvidence = null;
+    this.tailLoopSample = null;
     if (this.landingVerifyTimer !== null) {
       clearTimeout(this.landingVerifyTimer);
       this.landingVerifyTimer = null;

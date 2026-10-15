@@ -1582,6 +1582,56 @@ test('a loop immediately after postponement retains the previous progress eviden
   });
 });
 
+for (const probe of ['deadline', 'tail']) {
+  for (const speed of [0.5, 1, 2]) {
+    test(`sampled loop past three seconds is detected by ${probe} after fractional deferral at speed ${speed}`, async () => {
+      await withClock(async h => {
+        const seek = 30;
+        const duration = 174.322;
+        let state = { status: 1, position: duration - 0.162, duration, hasPosition: true, sampledAt: Date.now() };
+        const p = player(async () => state, { duration: duration * speed + seek, seek, speed });
+        p.manager.startCheckTimer(0.1);
+        await h.advance(100);
+        assert.equal(p.finished(), 0);
+        await h.advance(162);
+        assert.equal(p.finished(), 0, 'a frozen fractional tail is not evidence of completion');
+        await h.advance(5000);
+        state = { ...state, position: 7.501, sampledAt: Date.now() };
+        if (probe === 'deadline') await p.manager.verifyTimerDeadline();
+        else await p.manager.tailProbe();
+        assert.equal(p.finished(), 1, 'fresh tail-to-start rewind must not wait thirty seconds');
+        assert.equal(h.timers.size, 0);
+      });
+    });
+  }
+}
+
+for (const signal of ['cached', 'foreign', 'missing position', 'unknown status', 'mid-song', 'implausible rewind', 'long gap']) {
+  test(`sampled loop rejects ${signal} evidence`, async () => {
+    await withClock(async h => {
+      let state = { ...playing(signal === 'mid-song' ? 280 : 299.8), sampledAt: Date.now() };
+      const p = player(async () => state);
+      p.manager.startCheckTimer(0.1);
+      await h.advance(100);
+      await h.advance(200);
+      // Cancel scheduled probes to isolate the next observation without changing its generation.
+      for (const id of h.timers.keys()) clearTimeout(id);
+      await h.advance(signal === 'long gap' ? 20000 : 6000);
+      state = {
+        ...state, position: signal === 'implausible rewind' ? 80 : 7,
+        duration: signal === 'foreign' ? 900 : 300,
+        status: signal === 'unknown status' ? -1 : 1,
+        hasPosition: signal !== 'missing position',
+        sampledAt: signal === 'cached' ? state.sampledAt : Date.now(),
+      };
+      await p.manager.verifyTimerDeadline();
+      assert.equal(p.finished(), 0);
+      p.manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
 test('a slightly shorter stream that stops at its end advances promptly', async () => {
   await withClock(async h => {
     let status = 1;
