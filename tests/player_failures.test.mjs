@@ -2175,6 +2175,54 @@ test('cached idle samples and failed queries cannot confirm an external stop', a
   });
 });
 
+// Use the real shared cache: a three-second timer alone would still reuse five-second samples.
+for (const statusPage of [false, true]) {
+  test(`hourly three-second cadence obtains fresh shared samples, statusPage=${statusPage}`, async () => {
+    await withClock(async h => {
+      const hour = new Date(Date.now());
+      hour.setMinutes(0, 0, 0);
+      hour.setHours(hour.getHours() + 1);
+      await h.advance(hour.getTime() - Date.now());
+      const client = new MinaHTTPClient({ user_id: 'test', device_id: 'test', services: {} });
+      const service = new MinaService({ getMinaClient: () => client }, {});
+      const queries = [];
+      client.doUbusRequest = async () => {
+        queries.push(Date.now() - hour.getTime());
+        return { code: 0, data: { info: JSON.stringify({
+          status: 1, play_song_detail: { position: 120000 + Date.now() - hour.getTime(), duration: 300000 },
+        }) } };
+      };
+      const { manager, pushes, tts } = player({
+        config: { hourly_chime_resume_enabled: true }, service: {
+          getPlayState: (...args) => service.getPlayState(...args),
+        },
+      });
+      manager.playbackConfirmed = true;
+      manager.playStartTimeMs = Date.now() - 120000;
+      manager.resetAutoNextTimer(120, false);
+      await flush();
+      let polling = statusPage;
+      let timer;
+      const ui = async () => {
+        await service.getPlayerStatus('account', 'speaker');
+        if (polling) timer = setTimeout(ui, 1000);
+      };
+      if (statusPage) void ui();
+      await flush();
+      await h.advance(9000);
+      assert.deepEqual(queries, statusPage ? [0, 3000, 6000, 9000] : [3000, 6000, 9000]);
+      assert.equal(manager.isHourlyResumePending(), false);
+      assert.equal(pushes.length, 0);
+      assert.equal(manager.unplayableSongs.size, 0);
+      assert.deepEqual(tts, []);
+      polling = false;
+      if (timer !== undefined) clearTimeout(timer);
+      manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
 // Exercise the entire hourly detection delay, including real Mina caching and cloud latency.
 for (const api of ['music', 'url']) {
   for (const statusPage of [false, true]) {
@@ -2250,8 +2298,8 @@ for (const api of ['music', 'url']) {
           await flush();
           await h.advance(hourAt + 8000 - Date.now() - 1);
           assert.equal(pushed.length, 0, 'do not interrupt the hourly announcement');
-          await h.advance(10001);
-          assert.equal(pushed.length, 1, 'recover within ten seconds of the idle device instead of two 20s polls');
+          await h.advance(8001);
+          assert.equal(pushed.length, 1, 'recover within eight seconds of idle, including shared cache and cloud latency');
           t.diagnostic(`simulated repush ${pushed[0].at - hourAt - 8000}ms after announcement ended`);
           assert.equal(manager.currentIndex, 0);
           assert.ok(pushed[0].url.includes('/songs/16/play'));
@@ -2347,7 +2395,7 @@ test('issue 481 hourly detection: real Mina backoff survives a failed fast confi
     await flush();
     await h.advance(80000);
     assert.equal(queries.length, 4);
-    assert.deepEqual(queries.map(at => at - hour.getTime()), [5000, 6000, 11000, 71000]);
+    assert.deepEqual(queries.map(at => at - hour.getTime()), [3000, 4000, 10000, 70000]);
     assert.equal(manager.isHourlyResumePending(), false);
     assert.equal(pushes.length, 0);
     manager.cleanup();
@@ -2863,7 +2911,7 @@ for (const reloadStatus of [-1, 1]) {
         state: 'playing', positionSec: 150, atMs: Date.now(), songId: 16, seekOffsetSec: 0,
       });
       // Inspect the detection stage before recovery is sent (the enabled window now polls sooner).
-      await h.advance(reloadStatus === 1 ? 6000 : 40000);
+      await h.advance(reloadStatus === 1 ? 4000 : 40000);
       assert.equal(manager.isSongUnplayable(16), false);
       assert.equal(pushes.length, 0);
       assert.equal(tts.length, 0);
@@ -3070,11 +3118,11 @@ test('issue 481: hourly cloud failure ends fast verification and preserves retry
     await h.advance(1000);
     assert.equal(queries.length, 1);
     assert.equal(queries[0].verify, true);
-    await h.advance(4999);
+    await h.advance(2999);
     assert.equal(queries.length, 1);
     await h.advance(1);
     assert.equal(queries.length, 2);
-    assert.equal(queries[1].verify, undefined);
+    assert.equal(queries[1].verify, false);
     assert.equal(s.pushes.length, 0);
     assert.equal(s.resumes.length, 0);
     s.manager.cleanup();
@@ -3092,7 +3140,7 @@ test('issue 481: hourly speech is not interrupted when the fast verification bud
         return { status: queries.length <= 2 ? 0 : speaking ? 1 : 3, position: 0, duration: 0, hasPosition: false, sampledAt: Date.now() };
       }
     });
-    await h.advance(7999);
+    await h.advance(5999);
     assert.equal(s.pushes.length, 0);
     assert.equal(s.resumes.length, 0);
     assert.equal(queries.filter(q => q.verify).length, 4);

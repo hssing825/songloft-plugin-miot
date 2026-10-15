@@ -164,7 +164,7 @@ interface DeadlineTailEvidence {
 
 /** 仅在服务器本地时间整点后 90 秒内识别；不按时钟无条件推歌。 */
 const HOURLY_RESUME_WINDOW_MS = 90000;
-const HOURLY_RESUME_POLL_MS = 5000;
+const HOURLY_RESUME_POLL_MS = 3000;
 const HOURLY_RESUME_FAST_POLL_MS = 1000;
 const HOURLY_RESUME_FAST_QUERIES = 4;
 
@@ -2882,6 +2882,7 @@ export class PlaylistManager {
     if (remainingMs <= 0) return;
     let interval = EXTERNAL_STOP_POLL_INTERVAL_MS;
     let verify = false;
+    let maxAgeMs: number | undefined;
     const song = this.getCurrentSong();
     if (hourlyEnabled && this.playbackConfirmed && !this.externalPlayback && song?.type !== 'radio') {
       const now = new Date(Date.now());
@@ -2891,6 +2892,7 @@ export class PlaylistManager {
         // 报时没有对话事件。先缩短发现中断的等待；仍须设备证据，不按整点直接重推。
         verify = this.stopPollMisses === 1 && !this.stopPollFastConfirmationUsed;
         interval = verify ? HOURLY_RESUME_FAST_POLL_MS : HOURLY_RESUME_POLL_MS;
+        maxAgeMs = HOURLY_RESUME_POLL_MS;
       } else {
         const nextHour = new Date(now);
         nextHour.setHours(nextHour.getHours() + 1, 0, 0, 0);
@@ -2901,7 +2903,7 @@ export class PlaylistManager {
     this.stopPollTimer = setTimeout(() => {
       this.stopPollTimer = null;
       if (verify) this.stopPollFastConfirmationUsed = true;
-      this.checkExternalStop(verify).catch(e => {
+      this.checkExternalStop(verify, maxAgeMs).catch(e => {
         songloft.log.warn('[PlaylistManager] checkExternalStop error: ' + String(e));
       });
     }, wait);
@@ -2917,7 +2919,7 @@ export class PlaylistManager {
    * 推进，说明设备其实在播，按 status 误报处理并清零计数
    * （见 EXTERNAL_STOP_POSITION_ADVANCE_MIN_SEC）。
    */
-  private async checkExternalStop(verify: boolean = false): Promise<void> {
+  private async checkExternalStop(verify: boolean = false, maxAgeMs?: number): Promise<void> {
     if (this.state !== 'playing' || this.isHourlyResumePending()) return;
     const indexAtCheck = this.currentIndex;
     const generationAtCheck = this.checkTimerGeneration;
@@ -2926,7 +2928,7 @@ export class PlaylistManager {
       this.checkTimerGeneration === generationAtCheck;
 
     try {
-      const st = await this.minaService.getPlayState(this.accountId, this.deviceId, verify ? { verify: true } : {});
+      const st = await this.minaService.getPlayState(this.accountId, this.deviceId, { verify, maxAgeMs });
       if (!isCurrent()) return;
       if (cancelVersion !== this.hourlyResumeCancelVersion) {
         this.scheduleStopPoll();
@@ -3108,7 +3110,7 @@ export class PlaylistManager {
       const fast = fastQueries < HOURLY_RESUME_FAST_QUERIES || confirmIdle;
       if (fastQueries < HOURLY_RESUME_FAST_QUERIES) fastQueries++;
       else if (confirmIdle) idleConfirmationQueries++;
-      const st = await this.minaService.getPlayState(this.accountId, this.deviceId, fast ? { verify: true } : {});
+      const st = await this.minaService.getPlayState(this.accountId, this.deviceId, { verify: fast, maxAgeMs: HOURLY_RESUME_POLL_MS });
       if (!task.isCurrent()) return;
       if (Date.now() - task.startedAt >= timeoutMs) break;
       const sampleAt = st.sampledAt ?? Date.now();

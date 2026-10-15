@@ -34,11 +34,14 @@ const PAUSE_VERIFY_DELAY_MS = 700;
 
 const UBUS_TIMEOUT_MS = 5000;
 const STATUS_INTERVAL_MS = 5000;
+const STATUS_MIN_INTERVAL_MS = 3000;
 const STATUS_FAILURE_DELAYS_MS = [5000, 60000, 300000, 600000];
 
 export interface StatusQueryOptions {
   /** 控制操作后的有限次数回读，绕过后台节流；仍不能复用操作前的采样。 */
   verify?: boolean;
+  /** 整点窗口可将成功采样缓存缩到三秒；不绕过失败退避或控制操作后的等待。 */
+  maxAgeMs?: number;
 }
 
 interface StatusQuery {
@@ -632,15 +635,20 @@ export class MinaHTTPClient {
   async getPlayerStatus(deviceId: string, options: StatusQueryOptions = {}): Promise<UbusResponse | null> {
     const query = this.getStatusQuery(deviceId);
     if (query.inflight?.revision === query.revision) return query.inflight.promise;
-    if (!options.verify && Date.now() < query.nextAt) {
-      return query.sample?.revision === query.revision && Date.now() - query.sample.at < STATUS_INTERVAL_MS
+    const maxAgeMs = Number.isFinite(options.maxAgeMs)
+      ? Math.max(STATUS_MIN_INTERVAL_MS, Math.min(STATUS_INTERVAL_MS, options.maxAgeMs!)) : STATUS_INTERVAL_MS;
+    // 仅缩短当前媒体上下文的成功缓存；失败、控制失效后的冷却仍使用 nextAt。
+    const nextAt = () => query.failures === 0 && query.sample?.revision === query.revision
+      ? Math.min(query.nextAt, query.sample.at + maxAgeMs) : query.nextAt;
+    if (!options.verify && Date.now() < nextAt()) {
+      return query.sample?.revision === query.revision && Date.now() - query.sample.at < maxAgeMs
         ? query.sample.result : null;
     }
 
     const revision = query.revision;
     const promise = this.enqueueUbus(deviceId, true, async () => {
       // 控制指令优先执行。旧的后台查询在出队时作废，不再给云端补发历史请求。
-      if (revision !== query.revision || (!options.verify && Date.now() < query.nextAt)) return null;
+      if (revision !== query.revision || (!options.verify && Date.now() < nextAt())) return null;
       let result: UbusResponse | null = null;
       try {
         result = await this.doUbusRequest(deviceId, 'player_get_play_status', 'mediaplayer', {}, isDebugLog() ? 'status' : '');

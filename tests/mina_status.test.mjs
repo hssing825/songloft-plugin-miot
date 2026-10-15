@@ -228,3 +228,75 @@ test('ubus passes the real five-second network timeout on both initial and token
     assert.equal(h.requests.at(-1).options.headers['X-Fetch-Timeout-Ms'], undefined);
   });
 });
+
+test('hourly three-second samples share UI requests without changing ordinary cache lifetime', async () => {
+  await withClient(async h => {
+    const sample = await h.service.getPlayerStatus('account', 'speaker');
+    h.advance(2999);
+    assert.equal(await h.client.getPlayerStatus('speaker', { maxAgeMs: 3000 }), sample);
+    assert.equal(h.requests.length, 1);
+    h.advance(1);
+    const slow = deferred();
+    h.setFetch(() => slow.promise);
+    const probes = Array.from({ length: 20 }, () => h.service.getPlayState('account', 'speaker', { maxAgeMs: 3000 }));
+    const ui = h.service.getPlayerStatus('account', 'speaker');
+    await flush();
+    assert.equal(h.requests.length, 2, 'hourly poll refreshes the sample at three seconds');
+    slow.resolve(response());
+    const states = await Promise.all(probes);
+    assert.ok(states.every(state => state.sampledAt === 103000));
+    const refreshed = await ui;
+    h.advance(4999);
+    assert.equal(await h.client.getPlayerStatus('speaker'), refreshed);
+    assert.equal(h.requests.length, 2, 'ordinary polling still caches for five seconds');
+    h.advance(1);
+    await h.client.getPlayerStatus('speaker');
+    assert.equal(h.requests.length, 3);
+  });
+});
+
+for (const maxAgeMs of [0, 1, 3000]) {
+  test(`short sample age ${maxAgeMs} never bypasses any failure backoff`, async () => {
+    await withClient(async h => {
+      h.setFetch(async () => { throw new Error('timeout'); });
+      for (const delay of [5000, 60000, 300000, 600000]) {
+        assert.equal(await h.client.getPlayerStatus('speaker', { maxAgeMs }), null);
+        const calls = h.requests.length;
+        h.advance(delay - 1);
+        assert.equal(await h.client.getPlayerStatus('speaker', { maxAgeMs }), null);
+        assert.equal(h.requests.length, calls);
+        h.advance(1);
+      }
+      h.setFetch(async () => response());
+      assert.ok(await h.client.getPlayerStatus('speaker', { maxAgeMs }));
+    });
+  });
+}
+
+for (const maxAgeMs of [0, 1, 1000, 2999, NaN, Infinity, 60000]) {
+  test(`sample age ${maxAgeMs} cannot increase traffic beyond the three-second minimum`, async () => {
+    await withClient(async h => {
+      const sample = await h.client.getPlayerStatus('speaker', { maxAgeMs });
+      h.advance(2999);
+      assert.equal(await h.client.getPlayerStatus('speaker', { maxAgeMs }), sample);
+      assert.equal(h.requests.length, 1);
+      h.advance(2001);
+      await h.client.getPlayerStatus('speaker', { maxAgeMs });
+      assert.equal(h.requests.length, 2);
+    });
+  });
+}
+
+test('three-second cache requests cannot reuse or shorten the wait after a control', async () => {
+  await withClient(async h => {
+    await h.client.getPlayerStatus('speaker');
+    await h.client.playerPlay('speaker');
+    h.advance(3000);
+    const calls = h.requests.length;
+    assert.equal(await h.client.getPlayerStatus('speaker', { maxAgeMs: 3000 }), null);
+    assert.equal(h.requests.length, calls);
+    h.advance(2000);
+    assert.ok(await h.client.getPlayerStatus('speaker', { maxAgeMs: 3000 }));
+    assert.equal(h.requests.length, calls + 1);
+  });
+});
