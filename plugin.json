@@ -4,7 +4,7 @@
   "version": "2026.10.16.2",
   "description": "通过 MIoT 协议把歌曲投放到智能音箱设备",
   "author": "Songloft Team",
-  "homepage": "https://github.com/songloft-org/songloft",
+  "homepage": "https://github.com/songloft-org/songloft-plugin-miot",
   "license": "Apache-2.0",
   "icon": "frontend/public/icon.svg",
   "entryPath": "miot",
