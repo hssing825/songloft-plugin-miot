@@ -140,6 +140,8 @@ export function registerDeviceHandlers(
         return jsonResponse({ success: false, error: 'device_id and text are required' });
       }
       const ok = await minaService.textToSpeech(account_id, device_id, text);
+      if (ok === null)
+        return jsonResponse({ success: false, status: 'unknown', error: 'TTS delivery unconfirmed; the device may already be speaking' });
       if (!ok) {
         songloft.log.warn(`[/mina/tts] failed account_id=${account_id} device_id=${device_id} text_length=${textLength}`);
         return jsonResponse({ success: false, error: 'failed to play tts' });

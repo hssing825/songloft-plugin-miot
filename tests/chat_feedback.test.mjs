@@ -118,3 +118,18 @@ test('acknowledgment protects brief speech and ignores cancelled tasks', async (
   await pending;
   assert.equal(sends, 1);
 });
+
+test('unconfirmed waiting hint retains startup protection without reporting a failed hint', async t => {
+  const h = storageOf(t);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const speech = new SpeechService({ textToSpeech: async () => null });
+  let done = false;
+  const pending = speech.acknowledge({ account: 'a', device: 'd', isCurrent: () => true }).then(() => { done = true; });
+  await flush();
+  t.mock.timers.tick(2999);
+  await flush();
+  assert.equal(done, false);
+  t.mock.timers.tick(1);
+  await pending;
+  assert.equal(h.logs.some(([, text]) => text.includes('waiting_feedback_failed')), false);
+});

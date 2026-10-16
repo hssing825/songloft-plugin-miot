@@ -26,7 +26,7 @@ export class SpeechService {
       return;
     try {
       const accepted = await this.devices.textToSpeech(token.account, token.device, '收到，正在思考。', current);
-      if (accepted && current()) {
+      if (accepted !== false && current()) {
         // 短提示仅保留启动保护；最终回答仍须新采样确认结束才能恢复音乐。
         await new Promise<void>(resolve => setTimeout(resolve, 3000));
       }
@@ -49,11 +49,15 @@ export class SpeechService {
     for (const text of segments) {
       if (!current())
         return 'cancelled';
-      if (!await this.devices.textToSpeech(token.account, token.device, text, current))
-        return current() ? 'failed' : 'cancelled';
+      const accepted = await this.devices.textToSpeech(token.account, token.device, text, current);
+      if (!current())
+        return 'cancelled';
+      if (accepted === false)
+        return 'failed';
       const started = Date.now();
       const protection = Math.max(3000, text.length / 4 * 1000);
       let idle = 0, sample = started;
+      let observedPlaying = false;
       while (Date.now() - started < 90000) {
         if (!current())
           return 'cancelled';
@@ -63,11 +67,14 @@ export class SpeechService {
         const status = await this.devices.getPlayState(token.account, token.device);
         if (!current())
           return 'cancelled';
-        if (Date.now() - started < protection)
-          continue;
         if (status.sampledAt && status.sampledAt > sample) {
           sample = status.sampledAt;
-          idle = status.status === 0 || status.status === 2 ? idle + 1 : 0;
+          if (status.status === 1)
+            observedPlaying = true;
+          if (Date.now() - started < protection)
+            continue;
+          // 超时回执后的 idle 也可能表示根本未起播，须先观察到本轮的新 playing。
+          idle = (accepted === true || observedPlaying) && (status.status === 0 || status.status === 2) ? idle + 1 : 0;
           if (idle >= 2)
             break;
         }

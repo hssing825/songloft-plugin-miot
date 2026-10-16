@@ -411,3 +411,71 @@ for (const phrase of ['停止', '暂停', '停止播放', '暂停播放', '暂�
     assert.deepEqual(h.calls, [['cancel', 'a', 'd', true, false], 'music']);
   });
 }
+
+for (const observedPlaying of [true, false]) {
+  test(`unconfirmed TTS requires fresh playing then idle evidence (playing=${observedPlaying})`, async t => {
+    storageOf(t);
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100000 });
+    let sends = 0, queries = 0;
+    const speech = new SpeechService({
+      textToSpeech: async () => { sends++; return null; },
+      getPlayState: async () => ({ status: observedPlaying && ++queries <= 2 ? 1 : 0, sampledAt: Date.now() }),
+    });
+    const pending = speech.speak('回答', { account: 'a', device: 'd', isCurrent: () => true });
+    await flush();
+    for (let i = 0; i < 90; i++) await tick(t, 1000);
+    assert.equal(await pending, observedPlaying ? 'completed' : 'unknown');
+    assert.equal(sends, 1);
+  });
+}
+
+test('unconfirmed TTS cancellation stops probing and prevents the next segment', async t => {
+  storageOf(t);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100000 });
+  let current = true, sends = 0;
+  const speech = new SpeechService({
+    textToSpeech: async () => { sends++; return null; },
+    getPlayState: async () => ({ status: 1, sampledAt: Date.now() }),
+  });
+  const pending = speech.speak('答'.repeat(205), { account: 'a', device: 'd', isCurrent: () => current });
+  await flush();
+  current = false;
+  await tick(t, 1000);
+  assert.equal(await pending, 'cancelled');
+  assert.equal(sends, 1);
+});
+
+for (const observedPlaying of [true, false]) {
+  test(`chat records TTS uncertainty and restores music only after playback evidence (playing=${observedPlaying})`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100000 });
+    const h = chatOf(t);
+    let queries = 0;
+    h.devices.textToSpeech = async () => null;
+    h.devices.getPlayState = async () => ({ status: observedPlaying && ++queries <= 2 ? 1 : 0, sampledAt: Date.now() });
+    h.chat.speech = new SpeechService(h.devices);
+    await h.chat.submit('a', 'd', '问题');
+    await tick(t, 0);
+    for (let i = 0; i < 90; i++) await tick(t, 1000);
+    assert.equal(h.chat.status('a', 'd').phase, observedPlaying ? 'completed' : 'unknown');
+    assert.equal(h.calls.some(c => Array.isArray(c) && c[0] === 'resume'), observedPlaying);
+    assert.equal(h.calls.some(c => Array.isArray(c) && c[0] === 'hold'), !observedPlaying);
+    const history = (await h.chat.memory.load(scope)).history;
+    assert.equal(history.at(-1).phase, observedPlaying ? 'completed' : 'unknown');
+    assert.equal(history.at(-1).assistant, '测试答案');
+  });
+}
+
+test('cached playing before TTS and repeated idle samples cannot confirm an unacknowledged segment', async t => {
+  storageOf(t);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100000 });
+  let sends = 0, queries = 0;
+  const speech = new SpeechService({
+    textToSpeech: async () => { sends++; return null; },
+    getPlayState: async () => ++queries === 1 ? { status: 1, sampledAt: 100000 } : { status: 0, sampledAt: 101000 },
+  });
+  const pending = speech.speak('答'.repeat(205), { account: 'a', device: 'd', isCurrent: () => true });
+  await flush();
+  for (let i = 0; i < 90; i++) await tick(t, 1000);
+  assert.equal(await pending, 'unknown');
+  assert.equal(sends, 1);
+});

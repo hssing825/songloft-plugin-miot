@@ -10,6 +10,15 @@ Include rule, scope, full owner/repo#number, failure/fix commit SHAs, actual val
 
 ## Entries
 
+### MIOT-010: Separate TTS cloud timeouts from explicit device rejection
+
+- Scope: Mina UBus TTS, AI speech completion, and music restoration.
+- Evidence: In the [latest songloft-org/songloft-plugin-miot#119 feedback](https://github.com/songloft-org/songloft-plugin-miot/issues/119#issuecomment-6205228653) on 2026-10-16, two `code=101 / device_data.code=3012` responses were followed by compatibility-endpoint code 900. The reporter heard both answers despite failed page status and only estimated the installed version as 10.14. Baseline `7188dfa34fbea31a0a3cb4c3b2e88ccc55288776` still discarded nonzero UBus responses as null, immediately resent through another endpoint, and marked chat as failed. These logs cannot locate the reported roughly 20-second delay.
+- Rule and fix: Preserve and parse nested device codes for TTS. Represent 3012 as unconfirmed delivery without resending or immediately failing the task; retain other control semantics. Unconfirmed speech requires fresh playing evidence from this attempt, the startup guard, and two fresh idle samples before the next segment or music restoration. Stale samples, idle alone, or query failures cannot prove completion. Without evidence within 90 seconds, retain unknown status, answer text, and paused music. Waiting hints retain their three-second guard. Implementation is the current uncommitted worktree; see [AI chat](docs/en/ai-chat.md).
+- Done right: Of 17 new regressions, 14 fail for the intended behavior against isolated old implementations. The fix passes 1143 plugin tests, type checking, QuickJS build, and package validation. Coverage includes the real MinaHTTPClient → MinaService → SpeechService shared-sampling chain, page task/history status, restore/hold behavior, cancellation, compatibility fallback, and isolation from non-TTS controls. Environment: Linux x86_64 / Node 22.17.1; evidence: `/tmp/miot-119/verification.json` and logs in the same directory.
+- Not run: Reporter hardware/firmware, actual speaker audio, and long-running behavior. No frontend or public-host changes; browser interaction and parent Go checks were not run. Simulated playing/idle does not prove real-device speech; the roughly 20-second delay remains unlocated.
+- Seen 1× (2026-10-16). Status: locally verified; release and real-device confirmation remain pending.
+
 ### MIOT-009: Scope AI failure speech in a passive conversation listener
 
 - Scope: AI command fallback in `MusicCommandService` and routing in `VoiceDispatcher`.

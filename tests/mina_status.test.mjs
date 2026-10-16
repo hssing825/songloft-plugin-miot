@@ -300,3 +300,78 @@ test('three-second cache requests cannot reuse or shorten the wait after a contr
     assert.equal(h.requests.length, calls + 1);
   });
 });
+
+for (const deviceData of [JSON.stringify({ code: 3012, msg: '远程控制超时' }), { code: 3012 }]) {
+  test(`TTS timeout is unconfirmed and does not resend through another endpoint (${typeof deviceData})`, async () => {
+    await withClient(async h => {
+      h.service.getDeviceIdentity = async () => ({ hardware: '', miotDID: '' });
+      h.setFetch(async () => response(200, { code: 101, data: { device_data: deviceData } }));
+      assert.equal(await h.service.textToSpeech('account', 'speaker', '回答'), null);
+      assert.deepEqual(h.requests.map(r => r.method), ['text_to_speech']);
+      assert.ok(!h.logs.some(log => log.message.includes('failed on all endpoints')));
+    });
+  });
+}
+
+for (const body of [
+  { code: 0, data: { code: 900 } },
+  { code: 0, data: { device_data: JSON.stringify({ code: 900 }) } },
+  { code: 101, data: { device_data: JSON.stringify({ code: 900 }) } },
+  { code: 101, data: { device_data: '{broken' } },
+]) {
+  test(`TTS definite rejection falls back and does not treat device errors as accepted: ${JSON.stringify(body)}`, async () => {
+    await withClient(async h => {
+      h.setFetch(async r => response(200, r.method === 'text_to_speech' ? body : { code: 0, data: { code: 0 } }));
+      assert.equal(await h.client.textToSpeech('speaker', '回答'), true);
+      assert.deepEqual(h.requests.map(r => r.method), ['text_to_speech', 'player_play_tts']);
+    });
+  });
+}
+
+test('fallback TTS timeout is also unconfirmed, and two explicit rejections remain failures', async () => {
+  await withClient(async h => {
+    h.setFetch(async r => response(200, { code: 101, data: { device_data: JSON.stringify({ code: r.method === 'text_to_speech' ? 900 : 3012 }) } }));
+    assert.equal(await h.client.textToSpeech('speaker', '回答'), null);
+    assert.equal(h.requests.length, 2);
+    h.setFetch(async () => response(200, { code: 101, data: { device_data: '{"code":900}' } }));
+    assert.equal(await h.client.textToSpeech('speaker', '回答'), false);
+    assert.equal(h.requests.length, 4);
+  });
+});
+
+test('non-TTS timeout keeps the existing control failure semantics', async () => {
+  await withClient(async h => {
+    h.setFetch(async () => response(200, { code: 101, data: { device_data: '{"code":3012}' } }));
+    assert.equal(await h.client.playerStop('speaker'), false);
+  });
+});
+
+test('real Mina service and speech polling confirm a timed-out TTS using shared fresh samples', async t => {
+  const { SpeechService } = loadSource('../src/chat/speech.ts', {});
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await withClient(async h => {
+    h.service.getDeviceIdentity = async () => ({ hardware: '', miotDID: '' });
+    let statusQueries = 0;
+    h.setFetch(async r => response(200, r.method === 'text_to_speech'
+      ? { code: 101, data: { device_data: '{"code":3012}' } }
+      : { code: 0, data: { info: JSON.stringify({ status: ++statusQueries === 1 ? 1 : 0 }) } }));
+    const speech = new SpeechService(h.service);
+    let result;
+    const pending = speech.speak('短回答', { account: 'account', device: 'speaker', isCurrent: () => true }).then(value => { result = value; });
+    await flush();
+    for (let i = 0; i < 10; i++) {
+      h.advance(1000);
+      t.mock.timers.tick(1000);
+      await flush();
+    }
+    assert.equal(result, undefined, 'a cached idle sample must not count twice');
+    h.advance(1000);
+    t.mock.timers.tick(1000);
+    await flush();
+    await pending;
+    assert.equal(result, 'completed');
+    assert.equal(h.requests.filter(r => r.method === 'text_to_speech').length, 1);
+    assert.equal(h.requests.filter(r => r.method === 'player_play_tts').length, 0);
+    assert.equal(statusQueries, 3);
+  });
+});

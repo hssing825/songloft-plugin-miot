@@ -360,9 +360,9 @@ export class MinaService {
   // ===== TTS =====
 
   /**
-   * TTS语音播报
+   * TTS语音播报；null 表示下发结果未确认，不能自动重发。
    */
-  async textToSpeech(accountId: string, deviceId: string, text: string, current?: () => boolean): Promise<boolean> {
+  async textToSpeech(accountId: string, deviceId: string, text: string, current?: () => boolean): Promise<boolean | null> {
     if (current?.() === false) return false;
     this.cancelInterrupt(accountId, deviceId, current);
     const client = this.getClient(accountId);

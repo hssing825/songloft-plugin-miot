@@ -10,6 +10,15 @@
 
 ## 条目
 
+### MIOT-010：TTS 云端超时必须与设备明确拒绝分开
+
+- 范围：Mina UBus TTS、AI 对话播报完成判断与音乐恢复。
+- 证据：2026-10-16，[songloft-org/songloft-plugin-miot#119 最新反馈](https://github.com/songloft-org/songloft-plugin-miot/issues/119#issuecomment-6205228653) 中，两次 `code=101 / device_data.code=3012` 后兼容接口返回 900，报告人确认回答已播出但页面失败，安装版本仅估计为 10.14。基线 `7188dfa34fbea31a0a3cb4c3b2e88ccc55288776` 仍把非零 UBus 回执丢为 null，立即换接口重发并将对话标为失败；日志不足以确定约 20 秒延迟的原因。
+- 规则与修复：TTS 保留并解析嵌套设备返回码，将 3012 表示为下发结果未确认，不重发、不直接报失败；其他控制接口保持原语义。未确认播报须先观察本轮新 playing，经过启动保护后再取得两次新 idle，才允许下一段和音乐恢复；旧缓存、只有 idle 或查询失败不能证明播报完成。90 秒仍无证据则保留 unknown、回答文本和音乐暂停；等待提示仍保留三秒保护。实现为本次未提交工作树，见 [AI 对话](docs/ai-chat.md)。
+- Done right：17 项新增回归中，14 项在隔离旧实现下因目标行为失败；修复后 1143 项插件测试、类型检查、QuickJS 构建与包校验通过。包含真实 MinaHTTPClient → MinaService → SpeechService 的共享采样调用链、页面任务及历史状态、恢复/保持暂停、取消、兼容接口与非 TTS 控制隔离。Linux x86_64 / Node 22.17.1，证据 `/tmp/miot-119/verification.json` 及同目录日志。
+- Not run：报告人音箱型号/固件、实际发声及长期运行；未改前端与公共宿主，未运行浏览器交互或父仓库 Go 检查。模拟 playing/idle 不证明真机播报；约 20 秒延迟保留为待定位。
+- Seen 1× (2026-10-16)。状态：本地验证，发布与真机复验待完成。
+
 ### MIOT-009：被动监听的 AI 失败提示必须限定请求范围
 
 - 范围：`MusicCommandService` 的 AI 口令兜底与 `VoiceDispatcher` 分流。

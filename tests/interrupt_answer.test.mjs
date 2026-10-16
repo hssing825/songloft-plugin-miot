@@ -387,3 +387,16 @@ test('queued resume rechecks cancellation before the device play request', async
     assert.deepEqual(actions(h), ['player_set_volume']);
   });
 });
+
+test('TTS endpoint reports unconfirmed delivery and does not repeat a 3012 command', async () => {
+  await harness(async h => {
+    h.setFetch(() => ({ response: { status: 200, text: () => JSON.stringify({ code: 101, data: { device_data: '{"code":3012}' } }) } }));
+    const routes = new Map();
+    registerDeviceHandlers({ get() { }, post: (path, handler) => routes.set(path, handler) }, h.service, {}, {}, {});
+    const result = await routes.get('/mina/tts')({ body: JSON.stringify({ account_id: 'a', device_id: 'd', text: '回答' }) });
+    assert.equal(result.status, 'unknown');
+    assert.equal(result.success, false);
+    assert.match(result.error, /unconfirmed/);
+    assert.deepEqual(actions(h), ['text_to_speech']);
+  });
+});
