@@ -17,6 +17,9 @@ import { confirmAction, notify, playerCommand, seekPlayer, setPlayMode, setPlayb
 interface LyricLine { time: number; text: string }
 interface LyricPayload { lyric?: string; tlyric?: string; rlyric?: string; lxlyric?: string }
 const lyrics = ref<LyricLine[]>([]);
+const lyricLoading = ref(false);
+const lyricError = ref('');
+let lyricGeneration = 0;
 const isFavorite = ref(false);
 const favoriteBusy = ref(false);
 const sleepTimerBusy = ref(false);
@@ -92,25 +95,45 @@ function parseLrc(text: string): LyricLine[] {
   return plain.map((line) => ({ time: Number.POSITIVE_INFINITY, text: line }));
 }
 
-async function loadSongDetails(): Promise<void> {
-  const songId = state.player.current_song?.id;
-  if (!songId) {
-    lyrics.value = [];
-    isFavorite.value = false;
-    return;
-  }
-  const [lyricResult, favoriteResult] = await Promise.allSettled([
-    get<LyricPayload>(`/lyric?song_id=${songId}`),
-    get<{ is_favorited: boolean }>(`/player/favorite/status?song_id=${songId}`),
-  ]);
-  if (lyricResult.status === 'fulfilled') {
-    const result = lyricResult.value;
+async function loadSongLyrics(songId: number, generation: number, refresh = false): Promise<void> {
+  lyricLoading.value = true;
+  lyricError.value = '';
+  try {
+    const result = await get<LyricPayload>(`/lyric?song_id=${songId}${refresh ? '&refresh=1' : ''}`);
+    if (generation !== lyricGeneration || state.player.current_song?.id !== songId) return;
     const text = String(result.lyric || result.lxlyric || result.tlyric || result.rlyric || '');
     lyrics.value = parseLrc(text);
-  } else {
-    lyrics.value = [];
+  } catch {
+    if (generation !== lyricGeneration || state.player.current_song?.id !== songId) return;
+    lyricError.value = '歌词获取失败，请重试';
+  } finally {
+    if (generation === lyricGeneration) lyricLoading.value = false;
   }
-  isFavorite.value = favoriteResult.status === 'fulfilled' && favoriteResult.value.is_favorited;
+}
+
+async function retryLyrics(): Promise<void> {
+  const songId = state.player.current_song?.id;
+  if (!songId || lyricLoading.value) return;
+  await loadSongLyrics(songId, lyricGeneration, true);
+}
+
+async function loadSongDetails(): Promise<void> {
+  const generation = ++lyricGeneration;
+  const songId = state.player.current_song?.id;
+  lyrics.value = [];
+  lyricError.value = '';
+  lyricLoading.value = false;
+  isFavorite.value = false;
+  if (!songId) return;
+  await Promise.allSettled([
+    loadSongLyrics(songId, generation),
+    get<{ is_favorited: boolean }>(`/player/favorite/status?song_id=${songId}`)
+      .then(result => {
+        if (generation === lyricGeneration && state.player.current_song?.id === songId) {
+          isFavorite.value = result.is_favorited;
+        }
+      }),
+  ]);
 }
 
 // 全屏播放器里的"删除当前歌曲"入口。临时歌单（id<0，语音"播放歌手X"生成的一次性队列）
@@ -301,6 +324,7 @@ onMounted(() => {
   void loadSleepTimer();
 });
 onUnmounted(() => {
+  lyricGeneration += 1;
   paletteGeneration += 1;
   window.clearTimeout(mobileScrollTimer);
 });
@@ -343,7 +367,10 @@ watch(() => navigation.playerPage, showMobilePage);
               <template v-if="lyrics.length">
                 <div v-for="(line, index) in lyrics" :key="`${line.time}-${index}`" class="lyric-line" :class="{ active: index === activeLyric }">{{ line.text }}</div>
               </template>
-              <div v-else class="lyrics-empty">暂无歌词</div>
+              <div v-else class="lyrics-empty">
+                <span role="status">{{ lyricLoading ? '正在获取歌词…' : lyricError || '暂无歌词，请确认已安装并启用歌词搜索插件' }}</span>
+                <SlButton v-if="state.player.current_song" variant="text" label="重新获取歌词" :disabled="lyricLoading" @click="retryLyrics" />
+              </div>
             </section>
           </div>
 
@@ -365,7 +392,10 @@ watch(() => navigation.playerPage, showMobilePage);
                 <template v-if="lyrics.length">
                   <div v-for="(line, index) in lyrics" :key="`${line.time}-${index}`" class="lyric-line" :class="{ active: index === activeLyric }">{{ line.text }}</div>
                 </template>
-                <div v-else class="lyrics-empty">暂无歌词</div>
+                <div v-else class="lyrics-empty">
+                  <span role="status">{{ lyricLoading ? '正在获取歌词…' : lyricError || '暂无歌词，请确认已安装并启用歌词搜索插件' }}</span>
+                  <SlButton v-if="state.player.current_song" variant="text" label="重新获取歌词" :disabled="lyricLoading" @click="retryLyrics" />
+                </div>
               </section>
             </div>
             <div class="fullscreen-page-indicator" aria-label="播放器页面">

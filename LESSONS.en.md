@@ -10,6 +10,16 @@ Include rule, scope, full owner/repo#number, failure/fix commit SHAs, actual val
 
 ## Entries
 
+### LYR-001: Lyric proxy budgets and page states must account for real searches
+
+- Scope: `songloft-org/songloft-plugin-lyrics#6`, lyrics on the plugin web page, separate from cloud catalog matching on a speaker's touchscreen.
+- Evidence: on 2026-10-17, baseline `b391a22581502fe39780d32c2549f8409d592375` already searched through the host, but its eight-second proxy budget was shorter than the host's fifteen seconds per provider. Timeouts/upstream failures became empty lyrics, with no loading or retry state. Old requests could also write back after song changes or stopping. Against an isolated baseline, four of five proxy regressions and all four page regressions failed.
+- Fix: wait up to thirty seconds, retain empty results for 404, report other failures for retry, and forward `refresh=1`. Load lyrics independently from favorites, show loading/error/missing states and retry controls, and reject stale responses using request generations and song IDs. Stopping and unmounting invalidate pending requests.
+- Done right: this uncommitted worktree passes 1148 plugin tests, 68 frontend tests, both type checks, QuickJS build, and package validation. A real temporary host loaded both packages; a strict fixture provider returned lyrics after nine seconds, and a read-only database query confirmed `scraped` caching. Forced refresh fetched changed content. Chrome 121 at 390px/1200px verified loading, rendered lyrics, and song changes through the real lyric endpoint; mobile also verified empty state and button retry. There were no page exceptions. Evidence: `*-before.log`, `tests.log`, `frontend-tests.log`, `integration-result.json`, `browser-result.json`, and screenshots under `/tmp/songloft-lyrics-6/`.
+- Rule: reuse host lyric source priority and caching. Insufficient waiting time and network failures do not mean lyrics are unavailable from the catalog. Form encoding of song metadata is recorded in the lyrics plugin repository.
+- Not run: reporter songs, actual provider connectivity, physical speaker audio, and long-running acceptance. Browser device status was a fixture; lyric requests and database state used the real temporary host. Uncommitted and unreleased.
+- Seen 1× (2026-10-17). Status: lesson.
+
 ### MIOT-010: Separate TTS cloud timeouts from explicit device rejection
 
 - Scope: Mina UBus TTS, AI speech completion, and music restoration.

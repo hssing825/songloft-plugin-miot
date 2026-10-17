@@ -564,7 +564,7 @@ h1, h2, h3, p { margin: 0; }
 .lyrics { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; scrollbar-width: none; }
 .lyrics::-webkit-scrollbar { display: none; }
 .fullscreen-lyrics-panel { height: 100%; padding: 32px 12px; }
-.lyrics-empty { min-height: 100%; display: flex; align-items: center; justify-content: center; color: var(--md-on-surface-variant); text-align: center; }
+.lyrics-empty { min-height: 100%; display: flex; flex-direction: column; gap: 12px; align-items: center; justify-content: center; color: var(--md-on-surface-variant); text-align: center; }
 .lyric-line { min-height: 48px; display: flex; align-items: center; justify-content: center; color: var(--md-on-surface-variant); font-size: 16px; line-height: 24px; text-align: center; transition: color .2s, font-size .2s; }
 .lyric-line.active { color: var(--md-on-surface); font-size: 19px; font-weight: 600; }
 .fullscreen-playback { width: 100%; max-width: 760px; flex: 0 0 auto; margin: 0 auto; padding: 12px 0 8px; }
