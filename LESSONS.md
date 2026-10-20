@@ -10,6 +10,15 @@
 
 ## 条目
 
+### MIOT-011：AI 问答变慢先拆掉与模型无关的固定等待，再怀疑模型
+
+- 范围：AI 对话的等待提示与打断两轮停止的间隔，[songloft-org/songloft-plugin-miot#119](https://github.com/songloft-org/songloft-plugin-miot/issues/119)。
+- 证据：2026-10-20，基线 `fb8b5ef56adc400fc2b6bcaa495c9952aceb9329`。报告人[日志](https://github.com/songloft-org/songloft-plugin-miot/issues/119#issuecomment-6281088024)里模型首字 `first_content_ms=1022`（T+5.41s），播报下发 `speech_dispatch_ms=9499`（T+13.89s），模型不是瓶颈。链路上有三段与模型无关的固定等待：接管期间模型已经答完仍要播完「收到，正在思考」的 3 秒可闻窗口；该窗口原先从 TTS 云端往返返回后才起算，等于把一两秒往返整段叠加；打断的两轮 stop 之间固定等 2000ms。主因在宿主侧的 500ms pump 轮询，见父仓库 [JSPLUG-001](https://github.com/songloft-org/songloft/blob/main/LESSONS.md)。MIOT-010 当时把「约 20 秒延迟」记为待定位，本条即其定位结果。
+- 规则与修复：接管结束时若生成已完成就整段跳过等待提示；提示的保护窗口改为从下发时刻起算，`remaining <= 0` 时不再等待。两轮停止仍无条件发送，不拿状态回读换掉第二轮——状态 0/2 可能误报（[songloft-org/songloft#449](https://github.com/songloft-org/songloft/issues/449)），且回读会扰动共享采样与退避；只把轮间间隔从 2000ms 收敛到固件落定所需的 600ms。诊断这类「慢」要先按日志把固定等待逐段减掉，再归因模型或网络。
+- Done right：本次未提交工作树，Linux x86_64 / Node 26.5.0。1150 项插件测试、`npx tsc --noEmit`（仅 6 项既有 `HTTPStream` 报错）、QuickJS 构建与包校验通过；回归矩阵 `player_failures`/`player_status`/`player_transition`/`mina_status` 全通过。新增两项用例覆盖「接管前已答完则不播提示」与「保护窗口吸收云端往返而非顺延」；保护窗口以 `Date.now` 为基准，测试必须同时假化 `setTimeout` 与 `Date` 才能精确到边界，只假化 `setTimeout` 会让断言随真实时钟漂移。
+- Not run：报告人音箱型号/固件、实际发声与长期运行；600ms 落定窗口是否足够覆盖固件转入媒体播放，仅据日志推断，未经真机验证。
+- Seen 1× (2026-10-20)。状态：经验；真机复验与发布待完成。
+
 ### LYR-001：歌词代理的等待预算和页面状态必须覆盖真实搜索
 
 - 范围：`songloft-org/songloft-plugin-lyrics#6`，插件网页歌词，不涉及触屏音箱云端歌词匹配。
@@ -26,7 +35,7 @@
 - 证据：2026-10-16，[songloft-org/songloft-plugin-miot#119 最新反馈](https://github.com/songloft-org/songloft-plugin-miot/issues/119#issuecomment-6205228653) 中，两次 `code=101 / device_data.code=3012` 后兼容接口返回 900，报告人确认回答已播出但页面失败，安装版本仅估计为 10.14。基线 `7188dfa34fbea31a0a3cb4c3b2e88ccc55288776` 仍把非零 UBus 回执丢为 null，立即换接口重发并将对话标为失败；日志不足以确定约 20 秒延迟的原因。
 - 规则与修复：TTS 保留并解析嵌套设备返回码，将 3012 表示为下发结果未确认，不重发、不直接报失败；其他控制接口保持原语义。未确认播报须先观察本轮新 playing，经过启动保护后再取得两次新 idle，才允许下一段和音乐恢复；旧缓存、只有 idle 或查询失败不能证明播报完成。90 秒仍无证据则保留 unknown、回答文本和音乐暂停；等待提示仍保留三秒保护。实现为本次未提交工作树，见 [AI 对话](docs/ai-chat.md)。
 - Done right：17 项新增回归中，14 项在隔离旧实现下因目标行为失败；修复后 1143 项插件测试、类型检查、QuickJS 构建与包校验通过。包含真实 MinaHTTPClient → MinaService → SpeechService 的共享采样调用链、页面任务及历史状态、恢复/保持暂停、取消、兼容接口与非 TTS 控制隔离。Linux x86_64 / Node 22.17.1，证据 `/tmp/miot-119/verification.json` 及同目录日志。
-- Not run：报告人音箱型号/固件、实际发声及长期运行；未改前端与公共宿主，未运行浏览器交互或父仓库 Go 检查。模拟 playing/idle 不证明真机播报；约 20 秒延迟保留为待定位。
+- Not run：报告人音箱型号/固件、实际发声及长期运行；未改前端与公共宿主，未运行浏览器交互或父仓库 Go 检查。模拟 playing/idle 不证明真机播报；约 20 秒延迟当时保留为待定位，已于 2026-10-20 定位，见 MIOT-011。
 - Seen 1× (2026-10-16)。状态：本地验证，发布与真机复验待完成。
 
 ### MIOT-009：被动监听的 AI 失败提示必须限定请求范围

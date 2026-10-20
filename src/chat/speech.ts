@@ -1,6 +1,8 @@
 import type { MinaService } from '../service/service';
 import type { InteractionToken } from '../playback/coordinator';
 export type SpeechResult = 'completed' | 'failed' | 'cancelled' | 'unknown';
+/** 等待提示的最短可闻窗口，从下发时刻起算。 */
+const ACKNOWLEDGE_PROTECTION_MS = 3000;
 export function speechSegments(answer: string): string[] {
   let text = answer.replace(/```[\s\S]*?```/g, '（代码请查看对话记录）').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/https?:\/\/\S+/g, '（链接请查看对话记录）').replace(/[*#`_>]/g, '').trim();
   if (text.length > 1200)
@@ -24,11 +26,15 @@ export class SpeechService {
   async acknowledge(token: InteractionToken, current = token.isCurrent): Promise<void> {
     if (!current())
       return;
+    const started = Date.now();
     try {
       const accepted = await this.devices.textToSpeech(token.account, token.device, '收到，正在思考。', current);
       if (accepted !== false && current()) {
         // 短提示仅保留启动保护；最终回答仍须新采样确认结束才能恢复音乐。
-        await new Promise<void>(resolve => setTimeout(resolve, 3000));
+        // 窗口从下发时刻起算：云端往返这一两秒提示音已在播，不该再整段叠加（#119）。
+        const remaining = ACKNOWLEDGE_PROTECTION_MS - (Date.now() - started);
+        if (remaining > 0)
+          await new Promise<void>(resolve => setTimeout(resolve, remaining));
       }
       else if (current())
         songloft.log.warn(`[AIChat] task=${token.id} waiting_feedback_failed`);

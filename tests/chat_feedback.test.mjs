@@ -31,9 +31,9 @@ test('model starts alongside acknowledgment; answer waits for acknowledgment', a
 });
 test('cancelling acknowledgment prevents delayed answer and music recovery', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const hint = deferred(), calls = [];
+  const hint = deferred(), answer = deferred(), calls = [];
   const h = chatOf(t, {
-    config: { waiting_feedback: true }, speech: {
+    config: { waiting_feedback: true }, request: () => answer.promise, speech: {
       acknowledge: () => hint.promise, speak: async (text) => { calls.push(text); return 'completed'; }, stop: async () => { },
     }
   });
@@ -41,6 +41,7 @@ test('cancelling acknowledgment prevents delayed answer and music recovery', asy
   t.mock.timers.tick(0);
   await flush();
   await h.chat.cancel('a', 'd');
+  answer.resolve('回答');
   hint.resolve();
   await flush();
   assert.deepEqual(calls, []);
@@ -49,14 +50,16 @@ test('cancelling acknowledgment prevents delayed answer and music recovery', asy
 });
 test('model failure waits for hint before sending failure speech', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const hint = deferred(), calls = [];
+  const hint = deferred(), failure = deferred(), calls = [];
   const h = chatOf(t, {
-    config: { waiting_feedback: true }, request: async () => { throw new Error('模型失败'); }, speech: {
+    config: { waiting_feedback: true }, request: () => failure.promise, speech: {
       acknowledge: () => hint.promise, speak: async (text) => { calls.push(text); return 'completed'; }, stop: async () => { },
     }
   });
   await h.chat.submit('a', 'd', '问题');
   t.mock.timers.tick(0);
+  await flush();
+  failure.reject(new Error('模型失败'));
   await flush();
   assert.deepEqual(calls, []);
   hint.resolve();
@@ -66,7 +69,8 @@ test('model failure waits for hint before sending failure speech', async (t) => 
 });
 test('group waiting feedback speaks only on the requester and preserves recovery', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const h = chatOf(t, { group: true, config: { waiting_feedback: true } });
+  const answer = deferred();
+  const h = chatOf(t, { group: true, config: { waiting_feedback: true }, request: () => answer.promise });
   const speech = new SpeechService(h.devices);
   h.chat.speech.acknowledge = (...args) => speech.acknowledge(...args);
   await h.chat.submit('a', 'd', '问题');
@@ -74,10 +78,42 @@ test('group waiting feedback speaks only on the requester and preserves recovery
   await flush();
   assert.deepEqual(h.calls.filter(c => Array.isArray(c) && c[0] === 'tts'), [['tts', 'd', '收到，正在思考。']]);
   assert.deepEqual(h.calls.filter(c => Array.isArray(c) && c[0] === 'pause').map(c => c[1]), ['d', 'e']);
+  answer.resolve('测试答案');
   t.mock.timers.tick(3000);
   await flush();
   assert.equal(h.chat.status('a', 'd').phase, 'completed');
   assert.ok(h.calls.some(c => Array.isArray(c) && c[0] === 'resume' && c[1] === 43));
+});
+test('answer ready before takeover skips the waiting hint entirely', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const calls = [];
+  const h = chatOf(t, {
+    config: { waiting_feedback: true }, speech: {
+      acknowledge: async () => { calls.push('hint'); }, speak: async (text) => { calls.push(text); return 'completed'; }, stop: async () => { },
+    }
+  });
+  await h.chat.submit('a', 'd', '问题');
+  t.mock.timers.tick(0);
+  await flush();
+  assert.deepEqual(calls, ['测试答案']);
+  assert.equal(h.chat.status('a', 'd').phase, 'completed');
+});
+test('acknowledgment window absorbs the cloud round-trip instead of extending past it', async (t) => {
+  storageOf(t);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const sent = deferred();
+  const speech = new SpeechService({ textToSpeech: () => sent.promise });
+  let finished = false;
+  const pending = speech.acknowledge({ account: 'a', device: 'd', isCurrent: () => true }).then(() => { finished = true; });
+  await flush();
+  t.mock.timers.tick(1200);
+  sent.resolve(true);
+  await flush();
+  t.mock.timers.tick(1799);
+  await flush();
+  assert.equal(finished, false);
+  t.mock.timers.tick(1);
+  await pending;
 });
 for (const speak of [true, false]) {
   test(`no acknowledgment for ${speak ? 'disabled feedback' : 'text-only test'}`, async (t) => {
@@ -102,7 +138,8 @@ test('acknowledgment failure is logged without failing the answer', async (t) =>
 });
 test('acknowledgment protects brief speech and ignores cancelled tasks', async (t) => {
   storageOf(t);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  // 保护窗口以 Date.now 为基准，必须和假定时器同步推进才能精确到边界。
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   let active = false, sends = 0, finished = false;
   const speech = new SpeechService({ textToSpeech: async (_a, _d, text) => { sends++; assert.equal(text, '收到，正在思考。'); return true; } });
   const token = { account: 'a', device: 'd', isCurrent: () => active };
@@ -121,7 +158,7 @@ test('acknowledgment protects brief speech and ignores cancelled tasks', async (
 
 test('unconfirmed waiting hint retains startup protection without reporting a failed hint', async t => {
   const h = storageOf(t);
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   const speech = new SpeechService({ textToSpeech: async () => null });
   let done = false;
   const pending = speech.acknowledge({ account: 'a', device: 'd', isCurrent: () => true }).then(() => { done = true; });

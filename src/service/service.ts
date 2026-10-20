@@ -20,7 +20,8 @@ export interface InterruptResult {
   stop_rounds: number;
 }
 
-const INTERRUPT_REPEAT_DELAY_MS = 2000;
+/** 两轮停止之间的间隔，只需覆盖固件转入媒体播放所需的落定时间。 */
+const INTERRUPT_SETTLE_DELAY_MS = 600;
 
 /** 设备信息（合并了API数据和本地配置） */
 export interface DeviceInfo {
@@ -145,7 +146,10 @@ export class MinaService {
       const isCurrent = () => this.interruptions.get(key) === ticket && this.getClient(accountId) === client && current?.() !== false;
       if (!client) return { status: 'failed', stop_rounds: 0 };
       for (let round = 0; round < 2; round++) {
-        if (round > 0) await new Promise(resolve => setTimeout(resolve, INTERRUPT_REPEAT_DELAY_MS));
+        // 第二轮覆盖"原回答结束后自动转入媒体播放"，照旧无条件发送——状态回读可能
+        // 误报 idle（songloft-org/songloft#449），不能用它换掉这轮保护。但 2s 对 AI
+        // 问答是纯延迟，缩到固件落定所需的时间即可（#119）。
+        if (round > 0) await new Promise(resolve => setTimeout(resolve, INTERRUPT_SETTLE_DELAY_MS));
         const result = await client.playerStopGuarded(deviceId, isCurrent);
         songloft.log.info(`[MinaService] interrupt device=${deviceId} round=${round + 1} result=${result}`);
         if (result !== 'stopped') return { status: result === 'cancelled' ? 'cancelled' : 'failed', stop_rounds: stopRounds };

@@ -13,7 +13,7 @@ curl -X POST 'http://你的Songloft服务器:58091/api/v1/jsplugin/miot/mina/int
   -d '{"account_id":"webhook中的account_id","device_id":"webhook中的device_id"}'
 ```
 
-接口立即发送一轮 `pause → stop`，该轮停止应答成功后等待 2000ms，再发送第二轮 `pause → stop`。两轮完成后才返回，因此调用耗时包含两秒等待及设备请求时间。任何一轮 stop 应答失败或抛出异常都会终止本次处理中断并返回失败，不继续重试。pause 是兼容性前置操作，单独拒绝 pause 时仍尝试 stop。
+接口立即发送一轮 `pause → stop`，该轮停止应答成功后等待 600ms，再发送第二轮 `pause → stop`。两轮完成后才返回，因此调用耗时包含这段落定等待及设备请求时间。间隔原为 2000ms，只需覆盖固件转入媒体播放所需的落定时间，为削减 AI 问答链路的固定延迟收敛到 600ms（[Issue #119](https://github.com/songloft-org/songloft-plugin-miot/issues/119)）；第二轮仍无条件发送，不用状态回读替代——状态 0/2 可能误报（[songloft-org/songloft#449](https://github.com/songloft-org/songloft/issues/449)）。任何一轮 stop 应答失败或抛出异常都会终止本次处理中断并返回失败，不继续重试。pause 是兼容性前置操作，单独拒绝 pause 时仍尝试 stop。
 
 两轮均成功时返回：
 
@@ -33,6 +33,6 @@ curl -X POST 'http://你的Songloft服务器:58091/api/v1/jsplugin/miot/mina/int
 
 设备不可用或停止失败时返回 `success: false`、`error: "failed to interrupt"`，并包含 `data.stop_rounds` 和 `data.cancelled: false`。缺少或无效的 ID 返回 `success: false` 和对应字段错误。
 
-该接口只控制指定音箱，不向设备组扩散，也不修改歌单队列或接管 DLNA 播放。应在小爱回答时调用；它不是歌单停止接口，仍在运行的歌单驱动后续可能继续推送音乐。普通 `/mina/stop` 仍只执行一轮停止；webhook 推送本身不会自动中断回答。脚本改用本接口后，无需再自行安排两秒后的第二次停止。
+该接口只控制指定音箱，不向设备组扩散，也不修改歌单队列或接管 DLNA 播放。应在小爱回答时调用；它不是歌单停止接口，仍在运行的歌单驱动后续可能继续推送音乐。普通 `/mina/stop` 仍只执行一轮停止；webhook 推送本身不会自动中断回答。脚本改用本接口后，无需再自行安排第二次停止。
 
 验证命令：`npx tsc --noEmit` 和 `node --experimental-strip-types --test tests/*.test.mjs`（Node 22.17 需启用 TypeScript 类型剥离，供既有测试直接导入 `.ts` 文件）。实际中断效果需要 L05b 等真实音箱复测。

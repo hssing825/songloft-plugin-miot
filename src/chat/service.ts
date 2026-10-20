@@ -119,6 +119,7 @@ export class AIChatService {
         return;
       const started = Date.now();
       let generating: Promise<string> | undefined;
+      let generated = false;
       const startGeneration = () => {
         if (generating || !current()) return;
         generating = (async () => {
@@ -142,7 +143,7 @@ export class AIChatService {
             },
           });
         })();
-        void generating.catch(() => { });
+        void generating.then(() => { generated = true; }, () => { generated = true; });
       };
       if (task.speak) {
         this.publish(task, 'preparing');
@@ -154,9 +155,11 @@ export class AIChatService {
       this.publish(task, 'generating');
       startGeneration();
       // SSE updates the page only. Native TTS waits for the complete answer.
+      // 接管期间模型已经答完时跳过等待提示：它的可闻窗口只会把回答再推迟三秒（#119）。
+      const waiting = task.speak && task.config.waiting_feedback && !generated;
       const [answer] = await Promise.allSettled([
         generating!,
-        task.speak && task.config.waiting_feedback ? this.speech.acknowledge(task.token, current) : Promise.resolve(),
+        waiting ? this.speech.acknowledge(task.token, current) : Promise.resolve(),
       ]);
       if (answer.status === 'rejected')
         throw answer.reason;

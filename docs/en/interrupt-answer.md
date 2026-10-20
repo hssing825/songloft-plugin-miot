@@ -13,7 +13,7 @@ curl -X POST 'http://your-Songloft-server:58091/api/v1/jsplugin/miot/mina/interr
   -d '{"account_id":"account_id from webhook","device_id":"device_id from webhook"}'
 ```
 
-The endpoint immediately sends one round of `pause → stop`. After that stop is acknowledged successfully, it waits 2000ms and sends a second round. It responds after both rounds finish, so request duration includes the two-second wait and device requests. A failed stop acknowledgment or exception in either round terminates processing and returns failure without further retries. Pause is a compatibility step; a rejected pause alone does not prevent the stop attempt.
+The endpoint immediately sends one round of `pause → stop`. After that stop is acknowledged successfully, it waits 600ms and sends a second round. It responds after both rounds finish, so request duration includes this settle wait and device requests. The interval was 2000ms; it only needs to cover the time firmware takes to switch into media playback, so it was reduced to 600ms to cut fixed latency from the AI chat path ([Issue #119](https://github.com/songloft-org/songloft-plugin-miot/issues/119)). The second round remains unconditional and is not replaced by a status read-back, because status 0/2 can be misreported ([songloft-org/songloft#449](https://github.com/songloft-org/songloft/issues/449)). A failed stop acknowledgment or exception in either round terminates processing and returns failure without further retries. Pause is a compatibility step; a rejected pause alone does not prevent the stop attempt.
 
 When both rounds succeed, the response is:
 
@@ -33,6 +33,6 @@ Requests already sent cannot be recalled. Physical buttons, the XiaoAI app, and 
 
 An unavailable device or failed stop returns `success: false`, `error: "failed to interrupt"`, and `data.stop_rounds` with `data.cancelled: false`. Missing or invalid IDs return `success: false` with the corresponding field error.
 
-This endpoint only controls the specified speaker. It does not propagate to a device group, modify playlist queues, or take over DLNA playback. Call it while XiaoAI is answering; active playlist automation may push music later, so this endpoint is not a playlist stop command. The existing `/mina/stop` still performs one round, and webhook delivery does not automatically interrupt answers. Scripts using the new endpoint no longer need to schedule their own second stop after two seconds.
+This endpoint only controls the specified speaker. It does not propagate to a device group, modify playlist queues, or take over DLNA playback. Call it while XiaoAI is answering; active playlist automation may push music later, so this endpoint is not a playlist stop command. The existing `/mina/stop` still performs one round, and webhook delivery does not automatically interrupt answers. Scripts using the new endpoint no longer need to schedule their own second stop.
 
 Validation commands: `npx tsc --noEmit` and `node --experimental-strip-types --test tests/*.test.mjs` (Node 22.17 needs TypeScript type stripping for existing tests that import `.ts` files directly). Actual interruption behavior still requires testing on an L05b or another real speaker.

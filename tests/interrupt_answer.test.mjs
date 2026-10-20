@@ -91,7 +91,7 @@ async function harness(run) {
 }
 const actions = h => h.requests.map(r => r.action || r.method);
 
-test('interrupt sends exactly two stop rounds, waits 2000ms after the first acknowledgment, and responds after the second', async () => {
+test('interrupt sends exactly two stop rounds, waits 600ms after the first acknowledgment, and responds after the second', async () => {
   await harness(async h => {
     const firstStop = deferred();
     h.setFetch(r => r.action === 'stop' && h.requests.length === 2 ? firstStop.promise : response());
@@ -103,13 +103,13 @@ test('interrupt sends exactly two stop rounds, waits 2000ms after the first ackn
     await h.advance(3000);
     firstStop.resolve(response());
     await flush();
-    await h.advance(1999);
+    await h.advance(599);
     assert.deepEqual(actions(h), ['pause', 'stop']);
     assert.equal(finished, false);
     await h.advance(1);
     assert.deepEqual(await pending, { status: 'accepted', stop_rounds: 2 });
     assert.deepEqual(actions(h), ['pause', 'stop', 'pause', 'stop']);
-    assert.equal(h.requests[2].at, 105000);
+    assert.equal(h.requests[2].at, 103600);
   });
 });
 
@@ -120,7 +120,7 @@ for (const failingStop of [1, 2]) {
       h.setFetch(r => response(r.action === 'stop' && ++stops === failingStop ? 1 : 0));
       const pending = h.service.interruptAnswer('a', 'd');
       await flush();
-      if (failingStop === 2) await h.advance(2000);
+      if (failingStop === 2) await h.advance(600);
       assert.deepEqual(await pending, { status: 'failed', stop_rounds: failingStop - 1 });
       assert.equal(h.requests.length, failingStop * 2);
     });
@@ -179,13 +179,13 @@ test('new interrupt supersedes the old task without letting old cleanup delete t
   await harness(async h => {
     const old = h.service.interruptAnswer('a', 'd');
     await flush();
-    await h.advance(1000);
+    await h.advance(300);
     const newer = h.service.interruptAnswer('a', 'd');
     await flush();
-    await h.advance(1000);
+    await h.advance(300);
     assert.deepEqual(await old, { status: 'cancelled', stop_rounds: 1 });
     assert.equal(h.service.interruptions.size, 1);
-    await h.advance(1000);
+    await h.advance(600);
     assert.deepEqual(await newer, { status: 'accepted', stop_rounds: 2 });
     assert.deepEqual(actions(h), ['pause', 'stop', 'pause', 'stop', 'pause', 'stop']);
   });
@@ -240,7 +240,7 @@ test('new operation during an in-flight repeat pause prevents the following stop
     await flush();
     const slowPause = deferred();
     h.setFetch(r => r.action === 'pause' ? slowPause.promise : response());
-    await h.advance(2000);
+    await h.advance(600);
     const newer = h.service.resumePlay('a', 'd');
     slowPause.resolve(response());
     await newer;
@@ -293,7 +293,7 @@ test('token refresh retries a current interrupt command and completes both round
     h.setFetch(() => refreshed ? response() : { response: { status: 401, text: () => '' } });
     const pending = h.service.interruptAnswer('a', 'd');
     await flush();
-    await h.advance(2000);
+    await h.advance(600);
     assert.deepEqual(await pending, { status: 'accepted', stop_rounds: 2 });
     assert.deepEqual(actions(h), ['pause', 'pause', 'stop', 'pause', 'stop']);
   });
@@ -316,7 +316,7 @@ test('registered endpoint waits for both real service rounds and accepts a byte-
     const pending = routes.get('/mina/interrupt')({ body }).then(result => { finished = true; return result; });
     await flush();
     assert.equal(finished, false);
-    await h.advance(2000);
+    await h.advance(600);
     assert.equal((await pending).success, true);
     assert.deepEqual(actions(h), ['pause', 'stop', 'pause', 'stop']);
   });
