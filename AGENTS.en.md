@@ -138,6 +138,14 @@ The Node 22 type-stripping flag is required for tests that import TS directly. B
   retain the fact that a valid position was observed. A new track, URL repush of the same track, new playlist,
   or disposal clears it. Record late query results only after checking playback identity/revision; an old
   sample must not contaminate a replacement stream and add another thirty seconds of waiting.
+- **Status samples are not stream-change evidence (#124 recurrence, MIOT-013)**: at natural completion the
+  device often reports `status=0/2/3` once at the tail before re-pulling the same URL, and only the next
+  playing sample belongs to the re-pulled stream. Only explicit lifecycle events (pause, stop, repush, seek,
+  new track, external takeover, query failure) may clear the tail rewind baseline `tailLoopSample`; passive
+  idle samples must retain it, and an idle sample at the tail of the same stream may advance only the sample
+  timestamp so idle waiting is not counted as a long gap. Regress both deadline verification and the tail
+  probe with "tail playing → idle → rewind five seconds later"; testing only two adjacent playing samples
+  misses this path again.
 - **Reproduce interactions before fixing them**: new regression tests should fail before the fix and pass
   afterward. Assert the actual next-track URL push, queue index/state, failure markers, TTS, and remaining
   timers. Counting `onSongFinished` calls or inspecting screenshots alone does not establish queue continuity.
@@ -155,6 +163,7 @@ The Node 22 type-stripping flag is required for tests that import TS directly. B
 | Parent #466/#494, plugin #114 | Failure markers expire; all failed candidates still get a retry; natural completion neither blacklists tracks nor emits single-track TTS that interrupts the next URL | `player_failures`, frontend failure-marker tests |
 | Parent #408/#449, plugin #103 | Distinguish external stops from incorrect status reports using progress evidence; old tasks cannot push tracks after new controls or DLNA takeover | `player_failures`, `player_status` |
 | Parent #500/#503/#514 | Share queries per device, back off on failure, prioritize controls; expired handles and late results cannot clear replacement timers | `mina_status`, `player_transition`, host timer tests |
+| Plugin #124 recurrence / MIOT-013 | A tail idle sample must not drop the rewind baseline; an in-stream reset five seconds after `status=2` still advances immediately instead of waiting out the thirty-second grace | `player_transition` |
 
 Keep this matrix synchronized with the Chinese version. Named plugin tests use `tests/<name>.test.mjs`.
 The parent server and plugin upgrade independently; acceptance records must include both versions and the commits actually installed.

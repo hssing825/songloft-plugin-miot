@@ -1632,6 +1632,36 @@ for (const signal of ['cached', 'foreign', 'missing position', 'unknown status',
   });
 }
 
+for (const probe of ['deadline', 'tail']) {
+  test(`a tail idle report does not discard loop evidence for the following ${probe} rewind`, async () => {
+    await withClock(async h => {
+      let state = { status: 1, position: 299.8, duration: 300, hasPosition: true, sampledAt: Date.now() };
+      const p = player(async () => state);
+      const sample = () => probe === 'deadline' ? p.manager.verifyTimerDeadline() : p.manager.tailProbe();
+
+      await sample();
+      assert.equal(p.finished(), 0);
+      assert.ok(p.manager.tailLoopSample, 'the near-tail playing sample establishes the loop baseline');
+      for (const id of h.timers.keys()) clearTimeout(id);
+
+      // 自然播完时设备常在尾部先报一次 idle，随后重拉同一 URL 从流开头续播。
+      await h.advance(2000);
+      state = { status: 2, position: 299.8, duration: 300, hasPosition: true, sampledAt: Date.now() };
+      await sample();
+      assert.equal(p.finished(), 0, 'a single idle report at the tail is not ending evidence');
+      const baselineKept = !!p.manager.tailLoopSample;
+      for (const id of h.timers.keys()) clearTimeout(id);
+
+      await h.advance(5000);
+      state = { status: 1, position: 6.99, duration: 300, hasPosition: true, sampledAt: Date.now() };
+      await sample();
+      assert.equal(p.finished(), 1, 'the re-pulled stream must be recognized without the thirty-second grace');
+      assert.ok(baselineKept, 'an idle report must not discard the near-tail baseline');
+      p.manager.stopCheckTimer();
+    });
+  });
+}
+
 test('a slightly shorter stream that stops at its end advances promptly', async () => {
   await withClock(async h => {
     let status = 1;

@@ -2409,8 +2409,26 @@ export class PlaylistManager {
     const sampleAt = st.sampledAt ?? Date.now();
     const previous = this.tailLoopSample;
     if (previous && sampleAt <= previous.sampledAt) return false;
-    if (this.isVoiceSuspended() || st.status !== 1 || !st.hasPosition ||
-      !Number.isFinite(st.position) || st.position < 0 || !Number.isFinite(st.duration) ||
+    if (this.isVoiceSuspended()) {
+      this.tailLoopSample = null;
+      return false;
+    }
+    if (st.status !== 1) {
+      // 自然播完时设备常在尾部先报一次 idle，随后重拉同一 URL 从流开头续播。
+      // idle 不是换流证据：保留尾部基线；同一流尾部的 idle 只推进采样时刻，
+      // 让随后的回拨仍按相邻采样判断，而不是把 idle 等待算成长间隔。
+      if (isDeviceIdle(st.status)) {
+        if (previous && st.hasPosition && Number.isFinite(st.position) &&
+          Number.isFinite(st.duration) && Math.abs(previous.duration - st.duration) <= 1 &&
+          Math.abs(previous.position - st.position) <= TAIL_STALL_NEAR_END_SEC) {
+          this.tailLoopSample = { ...previous, sampledAt: sampleAt };
+        }
+        return false;
+      }
+      this.tailLoopSample = null;
+      return false;
+    }
+    if (!st.hasPosition || !Number.isFinite(st.position) || st.position < 0 || !Number.isFinite(st.duration) ||
       this.matchDeviceStream(st) !== 'ours') {
       this.tailLoopSample = null;
       return false;
