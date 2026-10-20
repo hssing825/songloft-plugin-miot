@@ -28,6 +28,7 @@ const { IndexingManager } = loadSource('../src/indexing/manager.ts', {
   '../data/traditional-to-simplified-map': loadSource('../src/data/traditional-to-simplified-map.ts'),
 });
 const { MusicCommandService: VoiceEngine } = loadSource('../src/music/service.ts', {
+  '../conversation/query': loadSource('../src/conversation/query.ts'),
   './guards': loadSource('../src/music/guards.ts'),
   '../playback/voice_resume': loadSource('../src/playback/voice_resume.ts', {
     './device_state': loadSource('../src/playback/device_state.ts'),

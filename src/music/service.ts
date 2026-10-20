@@ -27,6 +27,7 @@ import type { MemoryRecord } from '../memory';
 import type { OnlineSearchResult } from '../voicecmd/online_searcher';
 import type { ConversationMessage, VoiceCommand, PlayMode, AIAnalysisResult, SearchPriority } from '../types';
 import { getDefaultVoiceCommands } from '../voicecmd/defaults';
+import { conversationQuery } from '../conversation/query';
 export { getDefaultVoiceCommands } from '../voicecmd/defaults';
 
 // ===== 类型定义 =====
@@ -741,12 +742,7 @@ export class MusicCommandService {
    * 从 ConversationMessage 中提取用户 query
    */
   private extractQuery(msg: ConversationMessage): string {
-    const response = msg.message?.response;
-    if (!response || !response.answer || response.answer.length === 0) {
-      return '';
-    }
-    const ans = response.answer[0];
-    return ans.question || ans.intention?.query || '';
+    return conversationQuery(msg);
   }
 
   // ===== 私有方法 - 口令匹配 =====

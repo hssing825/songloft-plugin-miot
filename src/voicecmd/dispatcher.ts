@@ -4,6 +4,7 @@ import type { MusicCommandService } from '../music/service';
 import type { AIChatService } from '../chat/service';
 import type { PlaybackCoordinator } from '../playback/coordinator';
 import { DEFAULT_CHAT_CONFIG, chatScope } from '../chat/types';
+import { conversationQuery } from '../conversation/query';
 /** 监听只提交任务；每设备最新消息使旧分析失效。 */
 export class VoiceDispatcher {
   private versions = new Map<string, number>();
@@ -23,8 +24,7 @@ export class VoiceDispatcher {
   submit(message: ConversationMessage): void {
     if (this.closed)
       return;
-    const answer = message.message?.response?.answer?.[0];
-    const text = (answer?.intention?.query || answer?.question || '').trim();
+    const text = conversationQuery(message);
     if (!text)
       return;
     const scope = chatScope(message.account_id, message.device_id);

@@ -12,6 +12,7 @@ const { MusicCommandService } = load('../src/music/service.ts');
 const { AIAnalyzer } = load('../src/voicecmd/ai_analyzer.ts');
 const { VoiceDispatcher } = load('../src/voicecmd/dispatcher.ts');
 const { DEFAULT_CHAT_CONFIG } = load('../src/chat/types.ts');
+const { getDefaultVoiceCommands } = load('../src/voicecmd/defaults.ts');
 const message = {
   account_id: 'account', device_id: 'speaker',
   message: { response: { answer: [{ question: '来点适合现在听的音乐' }] } },
@@ -53,6 +54,23 @@ function fixture(t, { chat = {}, active = {}, ttsError = false, playing = false,
     submit: async () => events.push('chat'),
   }, { invalidate() { } });
   return { engine, dispatcher, speech, events };
+}
+
+for (const [question, intent] of [
+  ['播放歌曲请问你是谁', '请问你是谁'],
+  ['  ', '播放歌曲请问你是谁'],
+]) {
+  test(`dispatcher and music rules use the same query for local song requests: ${JSON.stringify(question)}`, async t => {
+    const f = fixture(t, { chat: { enabled: true } });
+    f.engine.configManager.getVoiceCommands = async () => getDefaultVoiceCommands();
+    f.engine.executePlaySong = async (name, account, device) => { f.events.push(['play', name, account, device]); };
+    f.dispatcher.submit({ ...message, message: {
+      response: { answer: [{ question, intention: { query: intent } }] },
+    } });
+    await flush();
+    assert.deepEqual(f.events, [['play', '请问你是谁', 'account', 'speaker']]);
+    assert.deepEqual(f.speech, []);
+  });
 }
 
 for (const failure of ['timeout', 'network', 'malformed', 'empty']) {

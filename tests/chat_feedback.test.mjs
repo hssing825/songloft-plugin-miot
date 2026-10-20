@@ -77,7 +77,8 @@ test('group waiting feedback speaks only on the requester and preserves recovery
   t.mock.timers.tick(0);
   await flush();
   assert.deepEqual(h.calls.filter(c => Array.isArray(c) && c[0] === 'tts'), [['tts', 'd', '收到，正在思考。']]);
-  assert.deepEqual(h.calls.filter(c => Array.isArray(c) && c[0] === 'pause').map(c => c[1]), ['d', 'e']);
+  assert.deepEqual(h.calls.filter(c => Array.isArray(c) && c[0] === 'interrupt').map(c => c[1]), ['d']);
+  assert.deepEqual(h.calls.filter(c => Array.isArray(c) && c[0] === 'pause').map(c => c[1]), ['e']);
   answer.resolve('测试答案');
   t.mock.timers.tick(3000);
   await flush();

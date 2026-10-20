@@ -86,21 +86,22 @@ export class PlaybackCoordinator {
     // The lease and group are now validated. Model work can overlap cloud stop
     // requests; speech still waits for prepare to resolve.
     onReserved?.();
-    if (token.restore) {
-      await Promise.all(token.members.map(async (member) => {
-        const result = await this.devices.stopForInteraction(member.account_id, member.device_id, token.isCurrent);
-        if (result !== 'stopped' && token.isCurrent()) {
-          if (member.account_id === token.account && member.device_id === token.device)
-            throw new Error('无法暂停提问音箱');
-          songloft.log.warn(`[ChatPlayback] task=${token.id} member_pause_failed`);
-        }
-      }));
-    }
-    if (!token.isCurrent())
-      return;
-    const result = await this.devices.interruptAnswer(token.account, token.device, token.isCurrent);
-    if (token.isCurrent() && result.status !== 'accepted')
-      throw new Error('无法打断音箱原回答');
+    // 提问音箱由两轮打断直接停止，避免重复停止及等待其他成员后才接管。
+    // 所有停止任务完成后才允许播报，分组恢复锚点仍由同一个凭证保护。
+    await Promise.all([
+      (async () => {
+        const result = await this.devices.interruptAnswer(token.account, token.device, token.isCurrent);
+        if (token.isCurrent() && result.status !== 'accepted')
+          throw new Error('无法打断音箱原回答');
+      })(),
+      ...(token.restore ? token.members
+        .filter(member => member.account_id !== token.account || member.device_id !== token.device)
+        .map(async member => {
+          const result = await this.devices.stopForInteraction(member.account_id, member.device_id, token.isCurrent);
+          if (result !== 'stopped' && token.isCurrent())
+            songloft.log.warn(`[ChatPlayback] task=${token.id} member_pause_failed`);
+        }) : []),
+    ]);
   }
   async finish(token: InteractionToken, restore: boolean): Promise<void> {
     if (!token.isCurrent()) {

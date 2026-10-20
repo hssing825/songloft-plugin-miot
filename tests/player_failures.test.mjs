@@ -53,7 +53,9 @@ const { registerPlaylistHandlers, resolvePlayerStatus, updateDeviceStatusCache }
 });
 const defaults = loadSource('../src/voicecmd/defaults.ts', {});
 const sleepTimer = loadSource('../src/sleep_timer/index.ts', {});
+const conversation = loadSource('../src/conversation/query.ts', {});
 const { MusicCommandService: VoiceEngine } = loadSource('../src/music/service.ts', {
+  '../conversation/query': conversation,
   '../group/coordinator': {},
   './guards': loadSource('../src/music/guards.ts'),
   '../playback/voice_resume': loadSource('../src/playback/voice_resume.ts', { './device_state': deviceState }),
@@ -3001,7 +3003,7 @@ test('active chat detects volume controls without enabling the music engine', as
 test('DLNA takeover invalidates pending voice analysis before it can replace the cast', async () => {
   await withClock(async () => {
     const chatTypes = loadSource('../src/chat/types.ts', {});
-    const { VoiceDispatcher } = loadSource('../src/voicecmd/dispatcher.ts', { '../chat/types': chatTypes });
+    const { VoiceDispatcher } = loadSource('../src/voicecmd/dispatcher.ts', { '../chat/types': chatTypes, '../conversation/query': conversation });
     const { PlaybackCoordinator } = loadSource('../src/playback/coordinator.ts', { '../chat/types': chatTypes });
     const { manager } = player(), wait = deferred(), calls = [];
     manager.minaService.setOnControl = callback => { manager.minaService.notifyControl = callback; };

@@ -40,7 +40,7 @@ export function chatOf(t, options = {}) {
   const devices = {
     setOnControl(callback) { control = callback; },
     async stopForInteraction(account, device, current) { calls.push(['pause', device]); return current() ? (options.pauseResult?.[device] || 'stopped') : 'cancelled'; },
-    async interruptAnswer(account, device, current) { calls.push(['interrupt', device]); return { status: current() ? options.interruptResult || 'accepted' : 'cancelled' }; },
+    async interruptAnswer(account, device, current) { calls.push(['interrupt', device]); return { status: current() ? options.interruptResult || (options.pauseResult?.[device] === 'failed' ? 'failed' : 'accepted') : 'cancelled' }; },
     async textToSpeech(account, device, text, current) { calls.push(['tts', device, text]); return current(); },
     async getPlayState() { return { status: 0, sampledAt: Date.now() }; },
   };

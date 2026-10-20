@@ -156,7 +156,7 @@ function playbackHarness(group = false) {
     holdAfterInteraction: async (position) => { calls.push(['hold', position]); }
   };
   let onControl;
-  const devices = { setOnControl: fn => { onControl = fn; }, stopForInteraction: async (account, device) => { calls.push(['stop', device]); return 'stopped'; }, interruptAnswer: async () => ({ status: 'accepted' }) };
+  const devices = { setOnControl: fn => { onControl = fn; }, stopForInteraction: async (account, device) => { calls.push(['stop', device]); return 'stopped'; }, interruptAnswer: async (account, device) => { calls.push(['interrupt', device]); return { status: 'accepted' }; } };
   const config = { findDeviceGroup: async () => group ? { members: [{ account_id: 'a', device_id: 'd' }, { account_id: 'a', device_id: 'e' }] } : null };
   const playback = new PlaybackCoordinator({ get: () => manager }, devices, config);
   return { calls, manager, playback, control: (device = 'd') => onControl('a', device), invalidate: () => guard?.() };
@@ -166,7 +166,7 @@ test('group pauses each member once and restores shared queue at original positi
   await h.playback.prepare(token);
   assert.equal(token.isCurrent(), true);
   await h.playback.finish(token, true);
-  assert.deepEqual(h.calls, [['stop', 'd'], ['stop', 'e'], ['resume', 37]]);
+  assert.deepEqual(h.calls, [['interrupt', 'd'], ['stop', 'e'], ['resume', 37]]);
 });
 test('group member new operation and DLNA invalidation prevent old recovery', async () => {
   for (const method of ['control', 'invalidate']) {
@@ -492,7 +492,7 @@ test('paused music remains paused after speech but manual resume must replace th
   const token = h.playback.token('paused', 'a', 'd');
   await h.playback.prepare(token);
   await h.playback.finish(token, true);
-  assert.deepEqual(h.calls, [['hold', 37]]);
+  assert.deepEqual(h.calls, [['interrupt', 'd'], ['hold', 37]]);
 });
 test('sleep expiry uses the shared primary and never stops a replacement group manager', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });

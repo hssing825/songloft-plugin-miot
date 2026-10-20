@@ -26,6 +26,9 @@ const { MinaHTTPClient } = loadSource('../src/mina/client.ts', {
 const { MinaService } = loadSource('../src/service/service.ts', {
   '../mina/auth': {}, '../mina/constants': constants,
 });
+const { PlaybackCoordinator } = loadSource('../src/playback/coordinator.ts', {
+  '../chat/types': { chatScope: (account, device) => JSON.stringify([account, device]) },
+});
 const cacheWrites = [];
 const { registerDeviceHandlers } = loadSource('../src/handlers/device.ts', {
   '@songloft/plugin-sdk': { jsonResponse: body => body },
@@ -90,6 +93,29 @@ async function harness(run) {
   }
 }
 const actions = h => h.requests.map(r => r.action || r.method);
+
+test('chat takeover sends only the two interrupt rounds through the real Mina client', async () => {
+  await harness(async h => {
+    const manager = {
+      getPosition: () => 43, getPlaybackRevision: () => 1,
+      isPlaying: () => true, isExternalPlayback: () => false,
+      cancelHourlyResume() {}, reserveForVoiceInteraction() {},
+      setInteractionGuard: () => () => {},
+    };
+    const playback = new PlaybackCoordinator({ get: () => manager }, h.service, { findDeviceGroup: async () => null });
+    const token = playback.token('chat', 'a', 'd');
+    const pending = playback.prepare(token);
+    await flush();
+    assert.deepEqual(actions(h), ['pause', 'stop']);
+    await h.advance(600);
+    await pending;
+    assert.deepEqual(actions(h), ['pause', 'stop', 'pause', 'stop']);
+    assert.equal(token.isCurrent(), true);
+    assert.equal(token.position, 43);
+    assert.equal(token.restore, true);
+    playback.close();
+  });
+});
 
 test('interrupt sends exactly two stop rounds, waits 600ms after the first acknowledgment, and responds after the second', async () => {
   await harness(async h => {

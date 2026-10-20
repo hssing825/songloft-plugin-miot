@@ -19,6 +19,15 @@ Include rule, scope, full owner/repo#number, failure/fix commit SHAs, actual val
 - Not run: the reporter's speaker model/firmware, actual audio, and long-running behavior. Whether 600ms is enough for the firmware to switch into media playback is inferred from logs and unverified on hardware.
 - Seen 1× (2026-10-20). Status: lesson; real-device confirmation and release pending.
 
+### MIOT-012: Preserve original voice commands and dispatch the first interruption promptly
+
+- Scope: the [new feedback on songloft-org/songloft-plugin-miot#119](https://github.com/songloft-org/songloft-plugin-miot/issues/119#issuecomment-6248858060), voice routing, music rules, and AI takeover. Complete field logs are still needed to establish the cause of the reporter's roughly ten-second wait.
+- Evidence: on 2026-10-18, baseline `fb8b5ef56adc400fc2b6bcaa495c9952aceb9329` preferred `intention.query` in the dispatcher but `question` in the music engine. Synthetic cloud intents with removed triggers or only a song title lost explicit chat routing, misrouted song requests into chat, or missed answer cancellation. During music playback, takeover waited for the entire group to stop before interrupting the requester twice, adding a redundant stop and allowing slow members to delay the first interruption.
+- Fix and rule: share extraction that prefers the original `question`, falling back to intent text only when missing or blank. Directly run the requester's two interruption rounds with the existing fixed inter-round interval (now 600ms; see MIOT-011), concurrently with stopping other members. Speech still waits for takeover, preserving leases, cancellation, pause behavior, and restore anchors. Fewer cloud requests do not prove improved physical audio behavior.
+- Done right: 8 of 117 targeted tests fail for the intended behavior against isolated old sources. The current uncommitted worktree passes all 1160 tests, type checking, QuickJS build, and package validation. Coverage includes four rather than six control requests through the real Mina client, slow members, cancellation during takeover, hint/answer ordering, and restoration position. Text samples are synthetic regressions, not the reporter's records. Environment: Linux x86_64 / Node 22.17.1; evidence: `/tmp/miot-119-20261018/{old-tests,full-tests,typecheck,build,validate}.log` and `verification.json`.
+- Not run: reporter hardware/firmware, physical audio, phone DLNA discovery, and long-running acceptance. No frontend or host changes; browser interactions and parent Go checks were not run. Failed local-song takeover and missing DLNA discovery still need separate Issues and field logs; neither is claimed fixed.
+- Seen 1× (2026-10-18). Status: locally verified, unpushed, and unreleased.
+
 ### LYR-001: Lyric proxy budgets and page states must account for real searches
 
 - Scope: `songloft-org/songloft-plugin-lyrics#6`, lyrics on the plugin web page, separate from cloud catalog matching on a speaker's touchscreen.
