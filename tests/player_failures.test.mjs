@@ -163,77 +163,84 @@ function player({ mode = 'loop', config = {}, service = {}, initialSongs = songs
   return { manager, pushes, tts };
 }
 
-for (const api of ['music', 'url']) {
-  for (const withStatusPage of [false, true]) {
-    for (const speed of [0.5, 1, 2]) {
-      test(`log 20261015: consecutive fractional tails advance with real ${api} commands, speed=${speed}, statusPage=${withStatusPage}`, async () => {
-        await withClock(async h => {
-          const metadata = [174, 184, 189];
-          const streamDurations = [174.322, 184.052, 189.532].map(value => value / speed);
-          const client = new MinaHTTPClient({ user_id: 'test', device_id: 'test', services: {} });
-          const service = new MinaService({ getMinaClient: () => client }, {
-            getConfig: async () => ({ music_api_model_disabled: api === 'url' ? ['LX05'] : [] }),
-          });
-          service.getDeviceIdentity = async () => ({ hardware: 'LX05' });
-          const pushed = [];
-          let streamStartedAt = Date.now();
-          let seek = 30;
-          const { manager, tts } = player({
-            mode: 'order', initialSongs: songs.map((song, i) => ({ ...song, duration: metadata[i] })),
-            service: {
-              playURL: (...args) => service.playURL(...args),
-              getPlayState: (...args) => service.getPlayState(...args),
-              getPlayerStatus: (...args) => service.getPlayerStatus(...args),
-            },
-          });
-          client.doUbusRequest = async (_device, method, _path, message) => {
-            if (method === 'player_get_play_status') {
-              const duration = streamDurations[manager.currentIndex] - seek / speed;
-              const elapsed = (Date.now() - streamStartedAt) / 1000;
-              // Like the log, freeze just short of the fractional end, then loop before the next shared sample.
-              const position = elapsed >= duration + 1 ? elapsed - duration - 1 : Math.min(elapsed, duration - 0.162);
-              await new Promise(resolve => setTimeout(resolve, 500));
-              return { code: 0, data: { info: JSON.stringify({
-                status: 1, volume: 30, play_song_detail: { position: position * 1000, duration: duration * 1000 },
-              }) } };
+for (const sample of [
+  { date: '20261015', metadata: [174, 184, 189], streams: [174.322, 184.052, 189.532], seek: 30, queryMs: 500, maxDelayMs: 10000 },
+  // The October 21 log froze 162ms short of the end, then replayed for 5–6s before detection.
+  { date: '20261021', metadata: [224, 243, 221], streams: [224.782, 243.547, 221.022], seek: 0, queryMs: 250, maxDelayMs: 2500 },
+  { date: '20261021-seek', metadata: [224, 243, 221], streams: [224.782, 243.547, 221.022], seek: 30, queryMs: 250, maxDelayMs: 2500 },
+]) {
+  for (const api of ['music', 'url']) {
+    for (const withStatusPage of [false, true]) {
+      for (const speed of [0.5, 1, 2]) {
+        test(`log ${sample.date}: consecutive fractional tails advance with real ${api} commands, speed=${speed}, statusPage=${withStatusPage}`, async () => {
+          await withClock(async h => {
+            const metadata = sample.metadata;
+            const streamDurations = sample.streams.map(value => value / speed);
+            const client = new MinaHTTPClient({ user_id: 'test', device_id: 'test', services: {} });
+            const service = new MinaService({ getMinaClient: () => client }, {
+              getConfig: async () => ({ music_api_model_disabled: api === 'url' ? ['LX05'] : [] }),
+            });
+            service.getDeviceIdentity = async () => ({ hardware: 'LX05' });
+            const pushed = [];
+            let streamStartedAt = Date.now();
+            let seek = sample.seek;
+            const { manager, tts } = player({
+              mode: 'order', initialSongs: songs.map((song, i) => ({ ...song, duration: metadata[i] })),
+              service: {
+                playURL: (...args) => service.playURL(...args),
+                getPlayState: (...args) => service.getPlayState(...args),
+                getPlayerStatus: (...args) => service.getPlayerStatus(...args),
+              },
+            });
+            client.doUbusRequest = async (_device, method, _path, message) => {
+              if (method === 'player_get_play_status') {
+                const duration = streamDurations[manager.currentIndex] - seek / speed;
+                const elapsed = (Date.now() - streamStartedAt) / 1000;
+                // Like the log, freeze just short of the fractional end, then loop before the next shared sample.
+                const position = elapsed >= duration + 1 ? elapsed - duration - 1 : Math.min(elapsed, duration - 0.162);
+                await new Promise(resolve => setTimeout(resolve, sample.queryMs));
+                return { code: 0, data: { info: JSON.stringify({
+                  status: 1, volume: 30, play_song_detail: { position: position * 1000, duration: duration * 1000 },
+                }) } };
+              }
+              if (method === 'player_play_music' || method === 'player_play_url') {
+                assert.equal(method, api === 'music' ? 'player_play_music' : 'player_play_url');
+                const url = method === 'player_play_music' ? JSON.parse(message.music).payload.audio_items[0].stream.url : message.url;
+                pushed.push(url);
+                seek = Number(new URL(url).searchParams.get('seek') || 0);
+                streamStartedAt = Date.now();
+              }
+              return { code: 0, data: { code: 0 } };
+            };
+            let statusTimer;
+            let statusActive = withStatusPage;
+            const pollStatus = async () => {
+              await resolvePlayerStatus({ getOrCreate: async () => manager }, manager.minaService, 'account', 'speaker');
+              if (statusActive) statusTimer = setTimeout(pollStatus, 1000);
+            };
+            updateDeviceStatusCache('account', 'speaker', { timestamp: 0 });
+            assert.equal(await manager.playCurrent({ seekSeconds: seek, speed }), true);
+            if (withStatusPage) await pollStatus();
+            for (let index = 0; index < 2; index++) {
+              const endAt = streamStartedAt + (streamDurations[index] - seek / speed + 1) * 1000;
+              await h.advance(endAt - Date.now() - 1);
+              assert.equal(manager.currentIndex, index, 'do not cut the original audio before its end');
+              await h.advance(sample.maxDelayMs + 1);
+              assert.equal(manager.currentIndex, index + 1, 'advance after the first fresh replay sample instead of the grace timeout');
+              assert.equal(pushed.length, index + 2);
+              assert.ok(pushed[index + 1].includes(`/songs/${songs[index + 1].id}/play`));
+              assert.ok(manager.checkTimer !== null);
+              assert.equal(manager.state, 'playing');
+              assert.equal(manager.unplayableSongs.size, 0);
+              assert.deepEqual(tts, []);
             }
-            if (method === 'player_play_music' || method === 'player_play_url') {
-              assert.equal(method, api === 'music' ? 'player_play_music' : 'player_play_url');
-              const url = method === 'player_play_music' ? JSON.parse(message.music).payload.audio_items[0].stream.url : message.url;
-              pushed.push(url);
-              seek = Number(new URL(url).searchParams.get('seek') || 0);
-              streamStartedAt = Date.now();
-            }
-            return { code: 0, data: { code: 0 } };
-          };
-          let statusTimer;
-          let statusActive = withStatusPage;
-          const pollStatus = async () => {
-            await resolvePlayerStatus({ getOrCreate: async () => manager }, manager.minaService, 'account', 'speaker');
-            if (statusActive) statusTimer = setTimeout(pollStatus, 1000);
-          };
-          updateDeviceStatusCache('account', 'speaker', { timestamp: 0 });
-          assert.equal(await manager.playCurrent({ seekSeconds: seek, speed }), true);
-          if (withStatusPage) await pollStatus();
-          for (let index = 0; index < 2; index++) {
-            const endAt = streamStartedAt + (streamDurations[index] - seek / speed + 1) * 1000;
-            await h.advance(endAt - Date.now() - 1);
-            assert.equal(manager.currentIndex, index, 'do not cut the original audio before its end');
-            await h.advance(10001);
-            assert.equal(manager.currentIndex, index + 1, 'advance after the first fresh replay sample instead of the grace timeout');
-            assert.equal(pushed.length, index + 2);
-            assert.ok(pushed[index + 1].includes(`/songs/${songs[index + 1].id}/play`));
-            assert.ok(manager.checkTimer !== null);
-            assert.equal(manager.state, 'playing');
-            assert.equal(manager.unplayableSongs.size, 0);
-            assert.deepEqual(tts, []);
-          }
-          statusActive = false;
-          if (statusTimer !== undefined) clearTimeout(statusTimer);
-          manager.cleanup();
-          assert.equal(h.timers.size, 0);
+            statusActive = false;
+            if (statusTimer !== undefined) clearTimeout(statusTimer);
+            manager.cleanup();
+            assert.equal(h.timers.size, 0);
+          });
         });
-      });
+      }
     }
   }
 }

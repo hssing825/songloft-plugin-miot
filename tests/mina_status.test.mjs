@@ -97,6 +97,83 @@ test('active volume readback immediately observes a completed volume control', a
   });
 });
 
+test('tail confirmation shares one-second samples and allows only four accelerated requests per control context', async () => {
+  await withClient(async h => {
+    await h.client.getPlayerStatus('speaker');
+    for (let i = 0; i < 4; i++) {
+      h.advance(999);
+      await h.client.getPlayerStatus('speaker', { tail: true });
+      assert.equal(h.requests.length, i + 1);
+      h.advance(1);
+      const [tail, ui] = await Promise.all([
+        h.service.getPlayState('account', 'speaker', { tail: true }),
+        h.service.getPlayState('account', 'speaker'),
+      ]);
+      assert.equal(h.requests.length, i + 2);
+      assert.equal(tail.sampledAt, Date.now());
+      assert.equal(ui.sampledAt, tail.sampledAt);
+    }
+    for (let i = 0; i < 4; i++) {
+      h.advance(1000);
+      await h.client.getPlayerStatus('speaker', { tail: true });
+      assert.equal(h.requests.length, 5, 'a frozen tail cannot enable permanent fast polling');
+    }
+    h.advance(1000);
+    await h.client.getPlayerStatus('speaker', { tail: true });
+    assert.equal(h.requests.length, 6);
+    h.advance(1000);
+    await h.client.getPlayerStatus('speaker', { tail: true });
+    assert.equal(h.requests.length, 6, 'ordinary samples do not replenish the burst');
+    await h.client.playerPlay('speaker');
+    assert.equal(await h.client.getPlayerStatus('speaker', { tail: true }), null, 'control cooldown remains');
+    await h.client.getPlayerStatus('speaker', { verify: true });
+    h.advance(1000);
+    await h.client.getPlayerStatus('speaker', { tail: true });
+    assert.equal(h.requests.length, 9, 'a new control context has a new bounded budget');
+  });
+});
+
+test('tail confirmation cannot bypass failure backoff or make ordinary consumers poll faster', async () => {
+  await withClient(async h => {
+    await h.client.getPlayerStatus('speaker');
+    h.advance(1000);
+    await h.client.getPlayerStatus('speaker', { tail: true });
+    h.advance(1000);
+    await h.client.getPlayerStatus('speaker');
+    assert.equal(h.requests.length, 2);
+    h.setFetch(async () => { throw new Error('cloud unavailable'); });
+    await h.client.getPlayerStatus('speaker', { tail: true });
+    assert.equal(h.requests.length, 3);
+    for (const delay of [5000, 60000]) {
+      const count = h.requests.length;
+      h.advance(delay - 1);
+      assert.equal(await h.client.getPlayerStatus('speaker', { tail: true }), null);
+      assert.equal(h.requests.length, count);
+      h.advance(1);
+      assert.equal(await h.client.getPlayerStatus('speaker', { tail: true }), null);
+      assert.equal(h.requests.length, count + 1);
+    }
+  });
+});
+
+test('a queued control invalidates an accelerated tail query and its late response', async () => {
+  await withClient(async h => {
+    await h.client.getPlayerStatus('speaker');
+    h.advance(1000);
+    const slow = deferred();
+    h.setFetch(request => request.method === 'player_get_play_status' ? slow.promise : Promise.resolve(response()));
+    const tail = h.client.getPlayerStatus('speaker', { tail: true });
+    await flush();
+    const control = h.client.playerPlay('speaker');
+    slow.resolve(response());
+    const [tailResult, controlResult] = await Promise.all([tail, control]);
+    assert.equal(tailResult, null);
+    assert.equal(controlResult, true);
+    assert.equal(h.requests.length, 3);
+    assert.equal(await h.client.getPlayerStatus('speaker', { tail: true }), null);
+  });
+});
+
 test('voice verification reads fresh idle state instead of the cached pre-interaction playing sample', async () => {
   await withClient(async h => {
     assert.equal((await h.service.getPlayState('account', 'speaker')).status, 1);

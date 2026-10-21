@@ -35,6 +35,8 @@ const PAUSE_VERIFY_DELAY_MS = 700;
 const UBUS_TIMEOUT_MS = 5000;
 const STATUS_INTERVAL_MS = 5000;
 const STATUS_MIN_INTERVAL_MS = 3000;
+const STATUS_TAIL_INTERVAL_MS = 1000;
+const STATUS_TAIL_FAST_QUERIES = 4;
 const STATUS_FAILURE_DELAYS_MS = [5000, 60000, 300000, 600000];
 
 export interface StatusQueryOptions {
@@ -42,12 +44,15 @@ export interface StatusQueryOptions {
   verify?: boolean;
   /** 整点窗口可将成功采样缓存缩到三秒；不绕过失败退避或控制操作后的等待。 */
   maxAgeMs?: number;
+  /** 已确认当前流接近结尾时，最多四次将成功缓存缩到一秒；不绕过失败退避。 */
+  tail?: boolean;
 }
 
 interface StatusQuery {
   revision: number;
   failures: number;
   nextAt: number;
+  tailFastQueries: number;
   sample?: { revision: number; result: UbusResponse; at: number };
   inflight?: { revision: number; promise: Promise<UbusResponse | null> };
 }
@@ -658,7 +663,8 @@ export class MinaHTTPClient {
   async getPlayerStatus(deviceId: string, options: StatusQueryOptions = {}): Promise<UbusResponse | null> {
     const query = this.getStatusQuery(deviceId);
     if (query.inflight?.revision === query.revision) return query.inflight.promise;
-    const maxAgeMs = Number.isFinite(options.maxAgeMs)
+    const fastTail = options.tail === true && !options.verify && query.tailFastQueries < STATUS_TAIL_FAST_QUERIES;
+    const maxAgeMs = fastTail ? STATUS_TAIL_INTERVAL_MS : Number.isFinite(options.maxAgeMs)
       ? Math.max(STATUS_MIN_INTERVAL_MS, Math.min(STATUS_INTERVAL_MS, options.maxAgeMs!)) : STATUS_INTERVAL_MS;
     // 仅缩短当前媒体上下文的成功缓存；失败、控制失效后的冷却仍使用 nextAt。
     const nextAt = () => query.failures === 0 && query.sample?.revision === query.revision
@@ -672,6 +678,9 @@ export class MinaHTTPClient {
     const promise = this.enqueueUbus(deviceId, true, async () => {
       // 控制指令优先执行。旧的后台查询在出队时作废，不再给云端补发历史请求。
       if (revision !== query.revision || (!options.verify && Date.now() < nextAt())) return null;
+      // 只计实际提前发出的请求；缓存命中和普通五秒查询不消耗/补充额度。
+      // 额度跟随控制上下文，不随播放器重排结束定时器或页面轮询而重置。
+      if (fastTail && Date.now() < query.nextAt) query.tailFastQueries++;
       let result: UbusResponse | null = null;
       try {
         result = await this.doUbusRequest(deviceId, 'player_get_play_status', 'mediaplayer', {}, isDebugLog() ? 'status' : '');
@@ -705,7 +714,7 @@ export class MinaHTTPClient {
   private getStatusQuery(deviceId: string): StatusQuery {
     let query = this.statusQueries.get(deviceId);
     if (!query) {
-      query = { revision: 0, failures: 0, nextAt: 0 };
+      query = { revision: 0, failures: 0, nextAt: 0, tailFastQueries: 0 };
       this.statusQueries.set(deviceId, query);
     }
     return query;
@@ -765,7 +774,9 @@ export class MinaHTTPClient {
    */
   async ubusRequest(deviceId: string, method: string, path: string, message: Record<string, unknown>, logLabel = '', isCurrent?: () => boolean, preserveErrors = false): Promise<UbusResponse | null> {
     if (method === 'player_get_play_status') return this.getPlayerStatus(deviceId);
-    this.getStatusQuery(deviceId).revision++;
+    const query = this.getStatusQuery(deviceId);
+    query.revision++;
+    query.tailFastQueries = 0;
     return this.enqueueUbus(deviceId, false, () => isCurrent?.() === false
       ? Promise.resolve(null)
       : this.doUbusRequest(deviceId, method, path, message, logLabel, isCurrent, preserveErrors));

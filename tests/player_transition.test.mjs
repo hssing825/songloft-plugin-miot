@@ -115,6 +115,32 @@ function player(readState, { duration = 300, seek = 0, speed = 1 } = {}) {
 
 const playing = position => ({ status: 1, position, duration: 300, hasPosition: true });
 
+for (const condition of ['current tail', 'idle at tail', 'mid-song', 'foreign duration', 'missing position', 'unknown status', 'stale', 'voice', 'timer reset', 'negative offset']) {
+  test(`fast tail sampling requires current stream evidence: ${condition}`, async () => {
+    await withClock(async h => {
+      const options = [];
+      const state = { status: 1, position: 134.838, duration: 135, hasPosition: true, sampledAt: Date.now() };
+      const p = player(async (_account, _device, query) => { options.push(query); return state; }, { seek: 30, speed: 2 });
+      p.manager.observeTailLoop(state);
+      if (condition === 'idle at tail') p.manager.observeTailLoop({ ...state, status: 2, sampledAt: Date.now() + 1 });
+      if (condition === 'mid-song') p.manager.observeTailLoop({ ...state, position: 100, sampledAt: Date.now() + 1 });
+      if (condition === 'foreign duration') p.manager.observeTailLoop({ ...state, duration: 500, sampledAt: Date.now() + 1 });
+      if (condition === 'missing position') p.manager.observeTailLoop({ ...state, hasPosition: false, sampledAt: Date.now() + 1 });
+      if (condition === 'unknown status') p.manager.observeTailLoop({ ...state, status: -1, sampledAt: Date.now() + 1 });
+      if (condition === 'stale') await h.advance(5001);
+      if (condition === 'voice') p.manager.suspendForVoiceInteraction();
+      if (condition === 'timer reset') p.manager.startCheckTimer(1);
+      if (condition === 'negative offset') p.manager.transitionOffset = -1;
+      await p.manager.getTailDeviceState();
+      assert.equal(Boolean(options[0].tail), condition === 'current tail' || condition === 'idle at tail');
+      assert.equal(options[0].verify, false, 'tail sampling must respect client backoff');
+      assert.equal(p.finished(), 0, 'near the end is not itself proof of completion');
+      p.manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
 for (const status of [0, 2, 3]) {
   for (const speed of [0.5, 1, 2]) {
     test(`confirmed tail accepts two fresh idle samples without detail: status=${status}, speed=${speed}`, async () => {

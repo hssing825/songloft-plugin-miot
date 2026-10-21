@@ -135,7 +135,7 @@ const LOOP_DETECT_RESET_THRESHOLD_SEC = 3;
 /** 进入歌曲最后这段窗口（曲内秒）才启动尾部探测；与 EXTERNAL_STOP_TAIL_GUARD_SEC 的盲区对齐，
  * 恰好接管那段「主定时器主动关掉外部停止探测」的尾部盲区 */
 const TAIL_PROBE_WINDOW_SEC = 15;
-/** 本地检查间隔；Mina 统一每五秒采样，重复采样不作为新结束证据。 */
+/** 本地检查间隔；普通采样五秒，确认尾部后有限次缩到一秒，缓存不作为新证据。 */
 const TAIL_PROBE_INTERVAL_MS = 1000;
 /** 与 Mina 的 HTTP 超时对齐，避免正常的秒级云端响应尚未返回就切歌。 */
 const DEADLINE_QUERY_WAIT_MS = 5000;
@@ -2343,7 +2343,16 @@ export class PlaylistManager {
   /** 尾部与主定时器同时到点时只查一次；清理定时器会使旧查询结果失效。 */
   private getTailDeviceState(verify = false): Promise<DevicePlayState> {
     if (this.tailProbeQuery) return this.tailProbeQuery;
-    const pending = this.minaService.getPlayState(this.accountId, this.deviceId, { verify }).finally(() => {
+    const sample = this.tailLoopSample;
+    const song = this.getCurrentSong();
+    // 只有同一流的新鲜尾部基线才申请快速查询。不能凭元数据计时、未知进度或
+    // 失准流长加速；结束判据不变，冻结在最后几百毫秒仍须等实际回零/停止证据。
+    const remaining = sample && song
+      ? Math.max(sample.duration, (song.duration - this.streamSeekOffsetSec) / this.playbackSpeed) - sample.position
+      : Infinity;
+    const tail = !verify && this.transitionOffset >= 0 && !this.isVoiceSuspended() && sample !== null &&
+      Date.now() - sample.sampledAt <= DEADLINE_RETRY_MS && remaining >= 0 && remaining <= TAIL_STALL_NEAR_END_SEC;
+    const pending = this.minaService.getPlayState(this.accountId, this.deviceId, { verify, tail }).finally(() => {
       if (this.tailProbeQuery === pending) this.tailProbeQuery = null;
     });
     this.tailProbeQuery = pending;
