@@ -46,6 +46,11 @@ interface MessageOptions {
   suppressAnalysisFailureHint?: () => boolean;
 }
 
+interface CommandContext {
+  current?: () => boolean;
+  nativeReply?: string;
+}
+
 /**
  * 独立歌曲候选：不在任何歌单里的歌，由 findStandaloneSongByName 经 songs.getById 拿到完整字段。
  * type 决定电台转码是否生效、duration 决定能否注册自动切歌定时器，两者都不能丢
@@ -309,7 +314,7 @@ export class MusicCommandService {
     if (fixedResult) {
       songloft.log.info(`[MusicCommandService] [Rule] → Matched fixed control: type=${fixedResult.command.type} keyword="${fixedResult.keyword}" argument="${fixedResult.argument}"`);
       if (options.current?.() === false) return false;
-      await this.executeCommand(fixedResult, accountId, msg.device_id, query);
+      await this.executeCommand(fixedResult, accountId, msg.device_id, query, { current: options.current, nativeReply: msg.message.response.answer[0]?.content });
       return true;
     }
 
@@ -358,7 +363,7 @@ export class MusicCommandService {
         songloft.log.info(`[MusicCommandService] [AI] Done: action=${aiResult.action} confidence=${aiResult.confidence} params=${JSON.stringify(aiResult.params)}`);
         if (aiResult.confidence !== 'low' && aiResult.action !== 'unknown') {
           songloft.log.info(`[MusicCommandService] [AI] → Executing fallback (high confidence, action=${aiResult.action})`);
-          const playedSong = await this.executeAIResult(aiResult, accountId, msg.device_id);
+          const playedSong = await this.executeAIResult(aiResult, accountId, msg.device_id, { current: options.current, nativeReply: msg.message.response.answer[0]?.content });
           if (memoryEnabled && (aiResult.action === 'play_song' || aiResult.action === 'play_artist') && playedSong) {
             this.queueMemorySuccess(query, playedSong);
           }
@@ -878,7 +883,7 @@ export class MusicCommandService {
   /**
    * 执行匹配到的口令
    */
-  private async executeCommand(result: MatchResult, accountId: string, deviceId: string, query?: string): Promise<PlayedSong | null> {
+  private async executeCommand(result: MatchResult, accountId: string, deviceId: string, query?: string, context: CommandContext = {}): Promise<PlayedSong | null> {
     const pm = this.playlistManagerMap.get(accountId, deviceId);
     const wasPlaying = pm?.isPlaying() ?? false;
     let playedSong: PlayedSong | null = null;
@@ -918,13 +923,13 @@ export class MusicCommandService {
         await this.executeFavorite(accountId, deviceId, result.command.param || 'add');
         break;
       case 'sleep_timer':
-        await this.executeSleepTimer(query || result.argument, accountId, deviceId);
+        await this.withSleepTimerResume(accountId, deviceId, () => this.executeSleepTimer(query || result.argument, accountId, deviceId, context.nativeReply), context.current);
         break;
       case 'cancel_sleep_timer':
-        await this.executeCancelSleepTimer(accountId, deviceId);
+        await this.withSleepTimerResume(accountId, deviceId, () => this.executeCancelSleepTimer(accountId, deviceId), context.current);
         break;
       case 'query_sleep_timer':
-        await this.executeQuerySleepTimer(accountId, deviceId);
+        await this.withSleepTimerResume(accountId, deviceId, () => this.executeQuerySleepTimer(accountId, deviceId), context.current);
         break;
       default:
         songloft.log.warn(`[MusicCommandService] Unknown command type: ${result.command.type}`);
@@ -937,7 +942,7 @@ export class MusicCommandService {
   /**
    * 执行 AI 分析结果
    */
-  private async executeAIResult(result: AIAnalysisResult, accountId: string, deviceId: string): Promise<PlayedSong | null> {
+  private async executeAIResult(result: AIAnalysisResult, accountId: string, deviceId: string, context: CommandContext = {}): Promise<PlayedSong | null> {
     songloft.log.info(`[MusicCommandService] [AI] Executing action=${result.action} params=${JSON.stringify(result.params)}`);
     const pm = this.playlistManagerMap.get(accountId, deviceId);
     const wasPlaying = pm?.isPlaying() ?? false;
@@ -1018,13 +1023,13 @@ export class MusicCommandService {
         await this.executeFavorite(accountId, deviceId, result.params?.action || 'add');
         break;
       case 'sleep_timer':
-        await this.executeSleepTimerFromAI(result, accountId, deviceId);
+        await this.withSleepTimerResume(accountId, deviceId, () => this.executeSleepTimerFromAI(result, accountId, deviceId, context.nativeReply), context.current);
         break;
       case 'cancel_sleep_timer':
-        await this.executeCancelSleepTimer(accountId, deviceId);
+        await this.withSleepTimerResume(accountId, deviceId, () => this.executeCancelSleepTimer(accountId, deviceId), context.current);
         break;
       case 'query_sleep_timer':
-        await this.executeQuerySleepTimer(accountId, deviceId);
+        await this.withSleepTimerResume(accountId, deviceId, () => this.executeQuerySleepTimer(accountId, deviceId), context.current);
         break;
       default:
         songloft.log.warn(`[MusicCommandService] [AI] Unknown action: ${result.action}`);
@@ -2055,13 +2060,43 @@ export class MusicCommandService {
 
   // ===== SleepTimer 相关方法 =====
 
+  /** 定时控制只改停止计划；播报前保护当前流，播报后交给现有协调器确认续播。 */
+  private async withSleepTimerResume(accountId: string, deviceId: string, execute: () => Promise<void>, current?: () => boolean): Promise<void> {
+    if (current?.() === false) return;
+    const pm = this.playlistManagerMap.get(accountId, deviceId);
+    const wasPlaying = pm?.isPlaying() ?? false;
+    if (wasPlaying) pm!.suspendForVoiceInteraction();
+    const revision = wasPlaying ? pm!.getPlaybackRevision() : undefined;
+    try {
+      await execute();
+    } finally {
+      // 到期停止、新暂停/切歌或新对话优先；TTS 失败仍需恢复被唤醒打断的歌曲。
+      if (wasPlaying && pm && this.enabled && current?.() !== false && pm.isPlaying() && pm.getPlaybackRevision() === revision) {
+        this.scheduleSmartResume(pm, accountId, deviceId);
+      }
+    }
+  }
+
+  private async confirmSleepTime(accountId: string, deviceId: string, minutes: number, nativeReply = ''): Promise<void> {
+    // 只复用明确且参数相同的原生确认。复合时长、失败或不明回答仍由插件确认。
+    const confirmed = nativeReply.trim().match(/^(?:好的?|没问题)[，,\s]*([0-9零一二两三四五六七八九十百千半个.]+(?:小时|分钟))后(?:我会|将会|将|会)?(?:自动)?(?:停止|暂停|关闭)播放[。！!\s]*$/);
+    if (confirmed && parseTimeDuration(confirmed[1]) === minutes) {
+      songloft.log.info('[MusicCommandService] [SleepTimer] Native confirmation matches; skipping duplicate TTS');
+      return;
+    }
+    const desc = minutes >= 60
+      ? (minutes % 60 === 0 ? `${minutes / 60}小时` : `${Math.floor(minutes / 60)}小时${minutes % 60}分钟`)
+      : `${minutes}分钟`;
+    await this.minaService.textToSpeech(accountId, deviceId, `好的，${desc}后将停止播放`);
+  }
+
   private setupSleepTimer(accountId: string, deviceId: string, mode: 'time' | 'songs', value: number): void { this.setSleepTimer(accountId, deviceId, mode, value); }
 
   /**
    * 规则匹配路径：从原始 query 中提取时间/曲目参数并设置定时器
    * @param query 原始语音文本（如 "30分钟后停止播放"、"再听3首后停"）
    */
-  private async executeSleepTimer(query: string, accountId: string, deviceId: string): Promise<void> {
+  private async executeSleepTimer(query: string, accountId: string, deviceId: string, nativeReply?: string): Promise<void> {
     const mode = detectSleepTimerMode(query);
     if (!mode) {
       songloft.log.warn(`[MusicCommandService] [SleepTimer] 无法识别定时模式 query="${query}"`);
@@ -2088,17 +2123,14 @@ export class MusicCommandService {
       }
       this.setupSleepTimer(accountId, deviceId, 'time', minutes);
       songloft.log.info(`[MusicCommandService] [SleepTimer] 设置时间定时: ${minutes}分钟后停止`);
-      const desc = minutes >= 60
-        ? (minutes % 60 === 0 ? `${minutes / 60}小时` : `${Math.floor(minutes / 60)}小时${minutes % 60}分钟`)
-        : `${minutes}分钟`;
-      await this.minaService.textToSpeech(accountId, deviceId, `好的，${desc}后将停止播放`);
+      await this.confirmSleepTime(accountId, deviceId, minutes, nativeReply);
     }
   }
 
   /**
    * AI 分析路径：从 AI 结果中提取参数并设置定时器
    */
-  private async executeSleepTimerFromAI(result: AIAnalysisResult, accountId: string, deviceId: string): Promise<void> {
+  private async executeSleepTimerFromAI(result: AIAnalysisResult, accountId: string, deviceId: string, nativeReply?: string): Promise<void> {
     const { duration, songs_count } = result.params;
 
     if (songs_count && songs_count > 0) {
@@ -2108,10 +2140,7 @@ export class MusicCommandService {
     } else if (duration && duration > 0) {
       this.setupSleepTimer(accountId, deviceId, 'time', duration);
       songloft.log.info(`[MusicCommandService] [SleepTimer] [AI] 设置时间定时: ${duration}分钟后停止`);
-      const desc = duration >= 60
-        ? (duration % 60 === 0 ? `${duration / 60}小时` : `${Math.floor(duration / 60)}小时${duration % 60}分钟`)
-        : `${duration}分钟`;
-      await this.minaService.textToSpeech(accountId, deviceId, `好的，${desc}后将停止播放`);
+      await this.confirmSleepTime(accountId, deviceId, duration, nativeReply);
     } else {
       songloft.log.warn(`[MusicCommandService] [SleepTimer] [AI] 参数无效: ${JSON.stringify(result.params)}`);
       await this.minaService.textToSpeech(accountId, deviceId, '抱歉，无法识别定时时间');

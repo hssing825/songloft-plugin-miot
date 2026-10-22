@@ -756,6 +756,362 @@ function resumeEngine(manager) {
   return engine;
 }
 
+function timerMessage(question, content = '') {
+  return {
+    account_id: 'account', device_id: 'speaker',
+    message: { timestamp_ms: Date.now(), response: { answer: [{ question, content }] } },
+  };
+}
+
+for (const api of ['music', 'url']) {
+  for (const statusPage of [false, true]) {
+    for (const speed of [0.5, 1, 2]) {
+      for (const idleStatus of [0, 3]) {
+        test(`issue 533 integrated: monitor to dispatcher to ${api}, statusPage=${statusPage}, speed=${speed}, idle=${idleStatus}`, async () => {
+          await withClock(async h => {
+            const chatTypes = loadSource('../src/chat/types.ts', {});
+            const { VoiceDispatcher } = loadSource('../src/voicecmd/dispatcher.ts', { '../chat/types': chatTypes, '../conversation/query': conversation });
+            const { PlaybackCoordinator } = loadSource('../src/playback/coordinator.ts', { '../chat/types': chatTypes });
+            const { ConversationMonitor } = loadSource('../src/conversation/monitor.ts', { '../utils/debug': { isDebugLog: () => false } });
+            const config = {
+              getConfig: async () => ({ conversation_poll_interval: 2, smart_resume_timeout: 30, music_api_model_disabled: api === 'url' ? ['L15A'] : [] }),
+              getChatConfig: async () => chatTypes.DEFAULT_CHAT_CONFIG,
+              getWebhooks: async () => [],
+              findDeviceGroup: async () => null,
+            };
+            const client = new MinaHTTPClient({ user_id: 'test', device_id: 'test', services: {} });
+            const accounts = {
+              getMinaClient: () => client,
+              getAccounts: async () => [{ id: 'account' }],
+              getManagedDevices: async () => [{ device_id: 'speaker', device_name: 'fixture', hardware: 'L15A' }],
+            };
+            const service = new MinaService(accounts, config);
+            service.getDeviceIdentity = async () => ({ hardware: 'L15A' });
+            const pushed = [], spoken = [], queries = [];
+            let wakeAt = Infinity;
+            let streamAt = Date.now() - 20000;
+            let seek = 60;
+            let interrupted = false;
+            client.getLatestAskFromXiaoai = async () => {
+              const available = Date.now() >= wakeAt + 4500;
+              await new Promise(resolve => setTimeout(resolve, 500));
+              return available ? [{ ...timerMessage('半小时后停止播放', '好的，30分钟后我会停止播放').message, timestamp_ms: wakeAt, request_id: 'sleep-533' }] : [];
+            };
+            client.doUbusRequest = async (_device, method, _path, message) => {
+              if (method === 'player_get_play_status') {
+                queries.push(Date.now());
+                const speaking = interrupted && Date.now() < wakeAt + 8000;
+                const info = interrupted
+                  ? { status: speaking ? 1 : idleStatus }
+                  : { status: 1, play_song_detail: { position: Math.min(Date.now() - streamAt, (300 - seek) / speed * 1000), duration: (300 - seek) / speed * 1000 } };
+                await new Promise(resolve => setTimeout(resolve, 500));
+                return { code: 0, data: { info: JSON.stringify(info) } };
+              }
+              await new Promise(resolve => setTimeout(resolve, 500));
+              if (method === 'player_play_music' || method === 'player_play_url') {
+                assert.equal(method, api === 'music' ? 'player_play_music' : 'player_play_url');
+                const url = method === 'player_play_music' ? JSON.parse(message.music).payload.audio_items[0].stream.url : message.url;
+                pushed.push({ url, at: Date.now() });
+                seek = Number(new URL(url).searchParams.get('seek') || 0);
+                streamAt = Date.now();
+                interrupted = false;
+              }
+              if (method === 'text_to_speech' || method === 'player_play_tts') spoken.push(message.text);
+              return { code: 0, data: { code: 0 } };
+            };
+            const { manager } = player({ mode: 'order' });
+            manager.minaService = service;
+            manager.streamSeekOffsetSec = seek;
+            manager.playbackSpeed = speed;
+            manager.playStartTimeMs = streamAt - seek / speed * 1000;
+            manager.streamStartedAtMs = streamAt;
+            manager.playbackConfirmed = true;
+            manager.resetAutoNextTimer(manager.getPosition(), false);
+            const engine = resumeEngine(manager);
+            engine.configManager.getConfig = config.getConfig;
+            engine.configManager.getChatConfig = config.getChatConfig;
+            const players = engine.playlistManagerMap;
+            const playback = new PlaybackCoordinator(players, service, config);
+            const dispatcher = new VoiceDispatcher(config, engine, {
+              status: () => ({ phase: 'completed', followup_until: 0 }),
+              cancel: async () => { },
+            }, playback);
+            const monitor = new ConversationMonitor(accounts, config);
+            monitor.registerCallback('voice', message => dispatcher.submit(message));
+            const starting = monitor.start();
+            await flush();
+            await h.advance(1000);
+            await starting;
+            let polling = statusPage;
+            let statusTimer;
+            const poll = async () => {
+              await resolvePlayerStatus({ getOrCreate: async () => manager }, service, 'account', 'speaker');
+              if (polling) statusTimer = setTimeout(poll, 1000);
+            };
+            updateDeviceStatusCache('account', 'speaker', { timestamp: 0 });
+            if (polling) void poll();
+            // Prime both monitor idle backoff and the real device-status cache before waking the speaker.
+            await h.advance(10000);
+            wakeAt = Date.now();
+            interrupted = true;
+            await h.advance(7999);
+            assert.equal(pushed.length, 0, 'do not interrupt the native answer');
+            await h.advance(16001);
+            assert.equal(monitor.getMessages().length, 1, 'the real monitor must deliver and deduplicate the cloud record');
+            assert.equal(pushed.length, 1, 'the full guarded dispatch/cache chain must actually send recovery audio');
+            assert.match(pushed[0].url, /\/songs\/16\/play/);
+            assert.ok(Number(new URL(pushed[0].url).searchParams.get('seek')) >= 60 + 31 * speed, 'preserve the pre-wakeup position');
+            assert.equal(manager.getPlaybackSpeed(), speed);
+            assert.equal(manager.isVoiceSuspended(), false);
+            assert.deepEqual(spoken, [], 'the real client must receive no duplicate native confirmation');
+            assert.equal(engine.getSleepTimerState('account', 'speaker').total, 1800000);
+            monitor.stop();
+            for (let index = 0; index < 2; index++) {
+              const endAt = streamAt + (300 - seek) / speed * 1000;
+              await h.advance(endAt - Date.now() - 1);
+              assert.equal(manager.currentIndex, index, 'preserve each track through its actual end');
+              await h.advance(7001);
+              assert.equal(manager.currentIndex, index + 1);
+              assert.equal(pushed.length, index + 2);
+              assert.ok(pushed.at(-1).url.includes(`/songs/${songs[index + 1].id}/play`));
+            }
+            assert.equal(manager.unplayableSongs.size, 0);
+            assert.ok(manager.checkTimer !== null);
+            assert.ok(queries.length > 0);
+            assert.deepEqual(spoken, []);
+            assert.ok(!h.logs.some(line => /Smart resume failed|VoiceDispatcher.*failed=|External stop confirmed/.test(line)));
+            polling = false;
+            clearTimeout(statusTimer);
+            dispatcher.close();
+            engine.close();
+            playback.close();
+            manager.cleanup();
+            assert.equal(h.timers.size, 0);
+          });
+        });
+      }
+    }
+  }
+}
+
+for (const withStatusPage of [false, true]) {
+  for (const [seek, speed] of [[0, 1], [100, 0.5], [60, 2]]) {
+    test(`issue 533: timer confirmation restores saved audio and natural next, statusPage=${withStatusPage}, seek=${seek}, speed=${speed}`, async () => {
+      await withClock(async h => {
+        let interrupted = false;
+        let streamStartedAt = Date.now();
+        let streamSeek = seek;
+        const s = player({
+          service: {
+            getPlayState: async () => interrupted
+              ? { status: 0, position: 0, duration: 0, hasPosition: true, sampledAt: Date.now() }
+              : { status: 1, position: Math.min((Date.now() - streamStartedAt) / 1000, (300 - streamSeek) / speed), duration: (300 - streamSeek) / speed, hasPosition: true, sampledAt: Date.now() },
+            playURL: async (_account, _device, url) => {
+              s.pushes.push(url);
+              streamSeek = Number(new URL(url).searchParams.get('seek') || 0);
+              streamStartedAt = Date.now();
+              interrupted = false;
+              return true;
+            },
+          },
+        });
+        await s.manager.playCurrent({ seekSeconds: seek, speed });
+        await h.advance(20000);
+        const savedPosition = s.manager.getPosition();
+        const engine = resumeEngine(s.manager);
+        interrupted = true;
+        await engine.handleMessage(timerMessage('半小时后停止播放', '好的，30分钟后我会停止播放'), { current: () => true });
+        assert.equal(s.manager.isVoiceSuspended(), true, 'timer controls must own recovery after the wakeup');
+        assert.deepEqual(s.tts, [], 'reuse the matching native confirmation');
+        let pollTimer;
+        let polling = withStatusPage;
+        const poll = async () => {
+          await resolvePlayerStatus({ getOrCreate: async () => s.manager }, s.manager.minaService, 'account', 'speaker');
+          if (polling) pollTimer = setTimeout(poll, 1000);
+        };
+        updateDeviceStatusCache('account', 'speaker', { timestamp: 0 });
+        if (polling) await poll();
+        await h.advance(10000);
+        assert.equal(s.pushes.length, 2, 'recovery must actually push the saved song URL');
+        assert.equal(Number(new URL(s.pushes[1]).searchParams.get('seek')), savedPosition);
+        assert.equal(s.manager.getPlaybackSpeed(), speed);
+        assert.equal(s.manager.state, 'playing');
+        assert.equal(s.manager.isVoiceSuspended(), false);
+        const endAt = streamStartedAt + (300 - streamSeek) / speed * 1000;
+        await h.advance(endAt - Date.now() - 1);
+        assert.equal(s.manager.currentIndex, 0, 'do not cut the recovered song early');
+        await h.advance(7001);
+        assert.equal(s.manager.currentIndex, 1);
+        assert.match(s.pushes.at(-1), /\/songs\/17\/play/);
+        assert.equal(s.manager.unplayableSongs.size, 0);
+        assert.ok(s.manager.checkTimer !== null);
+        polling = false;
+        clearTimeout(pollTimer);
+        engine.close();
+        s.manager.cleanup();
+        assert.equal(h.timers.size, 0);
+      });
+    });
+  }
+}
+
+for (const [question, ai] of [
+  ['30分钟后停止播放', null],
+  ['再听3首后停止', null],
+  ['还有多久停', null],
+  ['取消定时', null],
+  ['等会儿帮我停下', { action: 'sleep_timer', params: { duration: 30 } }],
+  ['听够三首就歇会', { action: 'sleep_timer', params: { songs_count: 3 } }],
+  ['撤掉那个安排', { action: 'cancel_sleep_timer', params: {} }],
+  ['告诉我剩余时间', { action: 'query_sleep_timer', params: {} }],
+]) {
+  test(`issue 533: ${ai ? 'AI' : 'rule'} timer control suspends before a slow confirmation: ${question}`, async () => {
+    await withClock(async h => {
+      const pendingSpeech = deferred();
+      const s = player({ service: { textToSpeech: () => pendingSpeech.promise } });
+      const engine = resumeEngine(s.manager);
+      if (ai) {
+        engine.configManager.getAIConfig = async () => ({ enabled: true });
+        engine.aiAnalyzer = { analyze: async () => ({ ...ai, confidence: 'high' }) };
+      }
+      s.manager.playStartTimeMs = Date.now() - 60000;
+      s.manager.startCheckTimer(240);
+      const pending = engine.handleMessage(timerMessage(question), { current: () => true });
+      await flush();
+      assert.equal(s.manager.isVoiceSuspended(), true);
+      assert.equal(s.manager.checkTimer, null);
+      await h.advance(12000);
+      assert.equal(s.manager.getPosition(), 60, 'TTS wait must not advance the resume anchor');
+      pendingSpeech.resolve();
+      assert.equal(await pending, true);
+      assert.equal(engine.voiceResume.tasks.size, 1);
+      engine.close();
+      s.manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+for (const content of ['', '好的', '抱歉，无法设置30分钟后停止播放', '好的，40分钟后我会停止播放', '好的，1小时30分钟后我会停止播放']) {
+  test(`issue 533: keep plugin confirmation for absent or different native answer: ${content}`, async () => {
+    await withClock(async h => {
+      const s = player();
+      const engine = resumeEngine(s.manager);
+      await engine.handleMessage(timerMessage('半小时后停止播放', content));
+      assert.deepEqual(s.tts, ['好的，30分钟后将停止播放']);
+      assert.equal(engine.getSleepTimerState('account', 'speaker').total, 1800000);
+      engine.close();
+      s.manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
+for (const ai of [false, true]) {
+  for (const content of ['好的，30分钟后我会停止播放', '好的，半小时后将停止播放', '没问题，三十分钟后会自动停止播放。']) {
+    test(`issue 533: ${ai ? 'AI' : 'rule'} reuses explicit native confirmation: ${content}`, async () => {
+      await withClock(async h => {
+        const s = player();
+        s.manager.state = 'paused';
+        const engine = resumeEngine(s.manager);
+        if (ai) {
+          engine.configManager.getVoiceCommands = async () => [];
+          engine.configManager.getAIConfig = async () => ({ enabled: true });
+          engine.aiAnalyzer = { analyze: async () => ({ action: 'sleep_timer', params: { duration: 30 }, confidence: 'high' }) };
+        }
+        await engine.handleMessage(timerMessage(ai ? '等会儿帮我停下' : '半小时后停止播放', content));
+        assert.deepEqual(s.tts, []);
+        assert.equal(engine.getSleepTimerState('account', 'speaker').total, 1800000);
+        assert.equal(s.manager.state, 'paused');
+        assert.equal(s.manager.isVoiceSuspended(), false);
+        assert.equal(engine.voiceResume.tasks.size, 0, 'setting a timer must not start paused audio');
+        engine.close();
+        s.manager.cleanup();
+        assert.equal(h.timers.size, 0);
+      });
+    });
+  }
+}
+
+test('issue 533: 30-minute timer stops exactly on expiry and an in-flight recovery cannot restart audio', async () => {
+  await withClock(async h => {
+    const state = deferred();
+    const s = player({ initialSongs: songs.map(song => ({ ...song, duration: 3600 })), service: { getPlayState: () => state.promise } });
+    const engine = resumeEngine(s.manager);
+    await engine.handleMessage(timerMessage('半小时后停止播放', '好的，30分钟后我会停止播放'));
+    await h.advance(1799999);
+    assert.equal(s.manager.isPlaying(), true);
+    assert.equal(engine.getSleepTimerState('account', 'speaker').remaining, 1);
+    await h.advance(1);
+    assert.equal(s.manager.isPlaying(), false);
+    assert.equal(engine.getSleepTimerState('account', 'speaker').active, false);
+    state.resolve({ status: 0, position: 0, duration: 0, hasPosition: true, sampledAt: Date.now() });
+    await h.advance(10000);
+    assert.deepEqual(s.pushes, []);
+    engine.close();
+    s.manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+test('issue 533: song-count timer survives recovery and stops after the requested songs', async () => {
+  await withClock(async h => {
+    const s = player({
+      service: {
+        getPlayState: async () => s.pushes.length
+          ? { status: 1, position: 12, duration: 300, hasPosition: true, sampledAt: Date.now() }
+          : { status: 0, position: 0, duration: 0, hasPosition: true, sampledAt: Date.now() }
+      }
+    });
+    const engine = resumeEngine(s.manager);
+    await engine.handleMessage(timerMessage('再听2首后停止'));
+    await h.advance(3000);
+    assert.equal(s.manager.isVoiceSuspended(), false);
+    assert.match(s.pushes.at(-1), /\/songs\/16\/play/);
+    assert.equal(engine.getSleepTimerState('account', 'speaker').remaining, 2);
+    await s.manager.onSongFinished();
+    assert.equal(s.manager.currentIndex, 1);
+    assert.match(s.pushes.at(-1), /\/songs\/17\/play/);
+    assert.equal(engine.getSleepTimerState('account', 'speaker').remaining, 1);
+    await s.manager.onSongFinished();
+    assert.equal(s.manager.isPlaying(), false);
+    assert.equal(engine.getSleepTimerState('account', 'speaker').active, false);
+    await h.advance(10000);
+    assert.equal(s.pushes.length, 2);
+    engine.close();
+    s.manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+for (const action of ['pause', 'next', 'new voice', 'TTS failure']) {
+  test(`issue 533: ${action} during confirmation cannot revive stale audio`, async () => {
+    await withClock(async h => {
+      const speech = deferred();
+      const s = player({ service: { textToSpeech: () => speech.promise, pausePlayVerified: async () => 'paused' } });
+      const engine = resumeEngine(s.manager);
+      let current = true;
+      const pending = engine.handleMessage(timerMessage('30分钟后停止播放'), { current: () => current });
+      await flush();
+      if (action === 'pause') await s.manager.pause();
+      if (action === 'next') await s.manager.next();
+      if (action === 'new voice') current = false;
+      if (action === 'TTS failure') speech.reject(new Error('speech unavailable'));
+      else speech.resolve();
+      if (action === 'TTS failure') {
+        await assert.rejects(pending, /speech unavailable/);
+        assert.equal(engine.voiceResume.tasks.size, 1, 'confirmation failure still needs recovery');
+      } else {
+        await pending;
+        assert.equal(engine.voiceResume.tasks.size, 0);
+      }
+      engine.close();
+      s.manager.cleanup();
+      assert.equal(h.timers.size, 0);
+    });
+  });
+}
+
 async function continuePlaying(engine) {
   await engine.handleMessage({
     device_id: 'speaker',

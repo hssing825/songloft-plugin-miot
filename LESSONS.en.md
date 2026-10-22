@@ -10,6 +10,15 @@ Include rule, scope, full owner/repo#number, failure/fix commit SHAs, actual val
 
 ## Entries
 
+### MIOT-016: Timer controls also interrupt audio; protect recovery before confirmation speech
+
+- Scope: rule and AI set/query/cancel sleep-timer controls in [songloft-org/songloft#533](https://github.com/songloft-org/songloft/issues/533).
+- Evidence: the 2026-10-22 attachment records successful 30-minute timers at 07:53:57 / 08:28:49 without voice recovery, followed by external stops. Baseline `b49a4a6a6902ed1778a4660782431bc2ab545381` omits all three controls from non-playback recovery; plugin TTS repeats the native confirmation of the same duration. Against isolated old source, 46 of the final 55 targeted tests fail for the target behavior.
+- Rule and fix: changing a future stop plan must preserve current music. Save position and suspend end detection before speaking, then use the existing coordinator after either TTS success or failure, checking request validity and playback revision. Only an explicit native confirmation of matching parameters can replace plugin speech; a merely nonempty answer is insufficient.
+- Done right: the uncommitted working tree passes 55 targeted and 1256 full plugin tests, 16 frontend playback regressions, type checking, QuickJS bytecode build/package validation, and full/targeted parent checks. Coverage includes time/song expiry, newer pause/track/conversation controls, seek/speed, status polling, natural next track, and TTS failure. All 24 added monitor/dispatcher/Mina cache integration scenarios pass and fail against old source because no recovery URL is sent; each also verifies two subsequent natural transitions. Acceptance of #481 does not establish timer-control acceptance. See the [validation record](docs/en/issue-533.md) for code identifiers, commands, and logs.
+- Not run: audible L15A playback, coexistence with firmware-native timers, long-running use, remote CI, or release. Approximately 5.35 seconds from cloud conversation timestamp to monitoring does not establish audible latency; no actual resume-time guarantee.
+- Seen 1× (2026-10-22). Status: implementation and local validation complete; see subsequent #533 delivery for commits, CI, and releases. Device acceptance is recorded separately.
+
 ### MIOT-015: Fast tail sampling needs evidence and a bounded budget, not globally faster polling
 
 - Scope: transition latency when the current stream freezes a few hundred milliseconds before its end and then restarts; separate from the duplicate files found on 2026-10-21.
