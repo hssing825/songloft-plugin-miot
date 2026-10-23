@@ -195,6 +195,29 @@ const LANDING_VERIFY_RETRY_DELAY_MS = 8000;
 const LANDING_VERIFY_ATTEMPTS = 2;
 
 /**
+ * 起播确认的「状态盲区」参数（songloft-org/songloft-plugin-miot#129）。
+ *
+ * 部分机型（OH2 等 Music API/代理播放设备）正常出声时，`player_get_play_status`
+ * 仍持续返回 status=0、position=0、duration=0。此时状态既不能证明起播成功，
+ * 也不能证明失败：
+ * - 先对当前流做一次 HEAD 探测：后端明确 404/410/5xx 才是真不可播，继续跳歌；
+ * - 流可拉取、或探测无法下结论（超时/外链）时，最多观察
+ *   LANDING_BLIND_ACCEPT_ATTEMPTS 轮，随后接受这条流并按元数据定时器播放，
+ *   不把「设备不上报」当成起播失败。
+ * 一旦拿到正进度或流长，立即退出盲区，恢复原有严格判定。
+ */
+const LANDING_BLIND_ACCEPT_ATTEMPTS = 2;
+const LANDING_STREAM_PROBE_TIMEOUT_MS = 5000;
+
+/**
+ * 状态盲区设备的尾部兜底窗口（#129）。
+ * 整首都没上报过正进度/流长时，到点校验不再多等三十秒「暂时缺失」宽限，
+ * 直接按元数据时长切歌（与 #124 无进度设备按时切歌一致）。
+ * 六十秒足以排除刚起播的正常缓冲；单次有效 0 仍不等同于「设备不支持进度」。
+ */
+const STREAM_BLIND_METADATA_FALLBACK_MS = 60000;
+
+/**
  * 连续起播失败的熔断阈值：达到即停播并 TTS 提示，避免整个音源都挂时把整个歌单跳完。
  * 计数在任何一次起播确认成功（status=1）后清零。
  */
@@ -382,6 +405,11 @@ export class PlaylistManager {
   // 已由连续尾部采样确认的当前流特征；恢复身份使用，不能当作准确时长/结束证据。
   private confirmedTailStream: { songId: number; seek: number; speed: number; duration: number } | null = null;
   private devicePositionObserved: boolean = false; // 当前流曾收到有效进度，软续播保留、重新推流清空
+  // 当前流是否出现过正进度/正流长。与 devicePositionObserved（包含有效的零）不同：
+  // OH2 等全零设备需要把「整条流从未上报」与「单次暂时缺失」区分开（#129）。
+  private streamEvidenceObserved: boolean = false;
+  private streamPositionObserved: boolean = false;
+  private blindIdleNoticeLogged: boolean = false; // 当前流已记录过「全零 idle，忽略外停探测」
   private landingVerifyTimer: any = null; // 定时器ID（起播确认探测，见 LANDING_VERIFY_* 常量）
   private landingFailureCount: number = 0; // 连续起播失败次数（#466 熔断），任何一次确认成功即清零
   private unplayableSongs = new Map<number, { reason: SongFailureReason; expiresAt: number }>();
@@ -1339,10 +1367,18 @@ export class PlaylistManager {
    */
   cleanup(): void {
     this.stopCheckTimer();
-    this.devicePositionObserved = false;
+    this.resetStreamEvidence();
     this.confirmedTailStream = null;
     this.stopResumePoll();
     this.clearPlaybackFailures();
+  }
+
+  /** 新流开始、重推或销毁时清空当前流的进度证据。 */
+  private resetStreamEvidence(): void {
+    this.devicePositionObserved = false;
+    this.streamEvidenceObserved = false;
+    this.streamPositionObserved = false;
+    this.blindIdleNoticeLogged = false;
   }
 
   private pruneSongFailures(): void {
@@ -1398,7 +1434,7 @@ export class PlaylistManager {
   prepareForNewPlayback(): void {
     this.endExternalPlayback();
     this.stopCheckTimer();
-    this.devicePositionObserved = false;
+    this.resetStreamEvidence();
     this.confirmedTailStream = null;
     this.stopResumePoll();
     this.clearVoiceSuspend();
@@ -1450,7 +1486,13 @@ export class PlaylistManager {
       devicePositionSec < this.voiceSuspendedPosition - RESUME_POSITION_TOLERANCE_SEC * this.playbackSpeed) return;
     this.stopCheckTimer();
     if (deviceReportsProgress && typeof devicePositionSec === 'number' &&
-      Number.isFinite(devicePositionSec) && devicePositionSec >= 0) this.devicePositionObserved = true;
+      Number.isFinite(devicePositionSec) && devicePositionSec >= 0) {
+      this.devicePositionObserved = true;
+      if (devicePositionSec > 0) {
+        this.streamEvidenceObserved = true;
+        this.streamPositionObserved = true;
+      }
+    }
     this.clearVoiceSuspend();
     const song = this.getCurrentSong();
     if (!song) return;
@@ -1556,7 +1598,7 @@ export class PlaylistManager {
    * 使用已有歌曲列表初始化播放列表（恢复用）
    */
   initWithSongs(songs: Song[], startIndex: number, playMode: PlayMode, playlistId: number): void {
-    this.devicePositionObserved = false;
+    this.resetStreamEvidence();
     this.confirmedTailStream = null;
     this.deadlineTailEvidence = null;
     this.tailLoopSample = null;
@@ -1574,7 +1616,7 @@ export class PlaylistManager {
    * 用歌手歌曲列表初始化临时歌单（恢复用，不自动播放）
    */
   initWithTempArtist(songs: Song[], artistName: string, playMode: PlayMode): void {
-    this.devicePositionObserved = false;
+    this.resetStreamEvidence();
     this.confirmedTailStream = null;
     this.deadlineTailEvidence = null;
     this.tailLoopSample = null;
@@ -1744,7 +1786,7 @@ export class PlaylistManager {
     }
 
     this.stopCheckTimer(opts?.isCurrent);
-    this.devicePositionObserved = false;
+    this.resetStreamEvidence();
     this.confirmedTailStream = null;
     this.playbackConfirmed = false;
     this.streamStartedAtMs = 0;
@@ -1915,12 +1957,16 @@ export class PlaylistManager {
 
     if (status < 0) {
       // 网络失败、节流或退避均不证明歌曲不可播放；仅后台等待下一次有效采样。
-      this.landingVerifyTimer = setTimeout(() => {
-        this.landingVerifyTimer = null;
-        this.verifyPlaybackLanded(indexAtLanding, songIdAtLanding, attempt).catch(e => {
-          songloft.log.warn('[PlaylistManager] landing verify error: ' + String(e));
-        });
-      }, LANDING_VERIFY_RETRY_DELAY_MS);
+      this.scheduleLandingRetry(indexAtLanding, songIdAtLanding, attempt);
+      return;
+    }
+
+    // #449：status 可能连续误报 paused/stopped。设备已经报出当前流的正进度时，
+    // 进度比状态码可靠；只要不是外来媒体的流长，就视为已起播。
+    if (sampledState && status !== 1 && sampledState.hasPosition && sampledState.position > 0 &&
+      this.matchDeviceStream({ ...sampledState, status: 1 }) !== 'foreign') {
+      songloft.log.info(`[PlaylistManager] Landing verify: status=${status} but device position=${sampledState.position}s advanced, treating as playing`);
+      this.confirmSongPlayback(songIdAtLanding);
       return;
     }
 
@@ -1930,19 +1976,50 @@ export class PlaylistManager {
       return;
     }
 
-    const nextAttempt = attempt + 1;
-    if (nextAttempt < LANDING_VERIFY_ATTEMPTS) {
-      this.landingVerifyTimer = setTimeout(() => {
-        this.landingVerifyTimer = null;
-        this.verifyPlaybackLanded(indexAtLanding, songIdAtLanding, nextAttempt).catch(e => {
-          songloft.log.warn('[PlaylistManager] landing verify error: ' + String(e));
-        });
-      }, LANDING_VERIFY_RETRY_DELAY_MS);
+    // #129：全零 idle 不能证明起播失败（OH2 正常出声时也这样上报）。
+    // 用当前流的 URL 可用性区分「音源真的坏了」与「设备只是不上报」。
+    if (sampledState && this.isBlindIdleState(sampledState)) {
+      const playable = await this.probeCurrentStreamPlayable();
+      if (this.state !== 'playing' || this.currentIndex !== indexAtLanding || this.checkTimerGeneration !== generationAtLanding) return;
+      if ((this.getCurrentSong()?.id ?? 0) !== songIdAtLanding) return;
+      if (playable === false) {
+        songloft.log.warn(`[PlaylistManager] Landing verify: stream probe failed for songId=${songIdAtLanding}, treating as unplayable`);
+        this.failLandingVerify(songIdAtLanding, status);
+        return;
+      }
+      const nextAttempt = attempt + 1;
+      if (playable === true || nextAttempt >= LANDING_BLIND_ACCEPT_ATTEMPTS) {
+        // 设备不上报状态/进度，但流可拉取：按元数据定时器继续播放，不误跳。
+        // 一旦后续采样出现正进度或流长，各种判定会恢复正常。
+        songloft.log.info(`[PlaylistManager] Landing verify: device reports no usable state (status=${status}, position=${sampledState.position}s, duration=${sampledState.duration}s, playable=${playable === true}), keeping playback on metadata timer`);
+        this.confirmSongPlayback(songIdAtLanding);
+        return;
+      }
+      this.scheduleLandingRetry(indexAtLanding, songIdAtLanding, nextAttempt);
       return;
     }
 
-    // 连续 LANDING_VERIFY_ATTEMPTS 次仍未起播：判定为起播失败，走跳歌
-    songloft.log.warn(`[PlaylistManager] Landing verify failed after ${LANDING_VERIFY_ATTEMPTS} attempts: status=${status}, treating as unplayable and advancing`);
+    const nextAttempt = attempt + 1;
+    if (nextAttempt < LANDING_VERIFY_ATTEMPTS) {
+      this.scheduleLandingRetry(indexAtLanding, songIdAtLanding, nextAttempt);
+      return;
+    }
+
+    this.failLandingVerify(songIdAtLanding, status);
+  }
+
+  private scheduleLandingRetry(indexAtLanding: number, songIdAtLanding: number, attempt: number): void {
+    this.landingVerifyTimer = setTimeout(() => {
+      this.landingVerifyTimer = null;
+      this.verifyPlaybackLanded(indexAtLanding, songIdAtLanding, attempt).catch(e => {
+        songloft.log.warn('[PlaylistManager] landing verify error: ' + String(e));
+      });
+    }, LANDING_VERIFY_RETRY_DELAY_MS);
+  }
+
+  /** 起播失败：标记临时不可播、上报后端并静默跳下一首（#466/#114）。 */
+  private failLandingVerify(songIdAtLanding: number, status: number): void {
+    songloft.log.warn(`[PlaylistManager] Landing verify failed: status=${status}, treating as unplayable and advancing`);
     // 记为「不可播放」：避免随机模式下 reserveNextIndex 再次抽中同一首、或用户切回时反复卡住
     this.markSongUnplayable(songIdAtLanding, 'landing');
     // 上报后端：#466。当前用 played 端点 event=landing_failed；后端后续可据此做临时降权
@@ -1955,6 +2032,61 @@ export class PlaylistManager {
     this.handleLandingFailure({ tts: true }).catch(e => {
       songloft.log.error('[PlaylistManager] handleLandingFailure error: ' + String(e));
     });
+  }
+
+  /**
+   * 成功查询却只有 idle 与全零媒体详情，且本条流从未出现过正进度/流长。
+   * 这正是 OH2 等设备正常播放时的固定回报（#129）：它证明不了失败，也证明不了外部停止。
+   * 只要本条流曾出现过正进度/流长，就返回 false，恢复常规判定。
+   */
+  private isBlindIdleState(state: DevicePlayState): boolean {
+    // 只有本进程下发过的流才有起播依据；重载接管的流没有下发时间，无法证明它经历过
+    // 正常起播，保持原有的 idle 判定，避免把「服务重启前就已停止」当成状态盲区。
+    if (this.streamStartedAtMs <= 0) return false;
+    if (!isDeviceIdle(state.status) || this.streamEvidenceObserved) return false;
+    if (state.hasPosition && Number.isFinite(state.position) && state.position > 0) return false;
+    return !(Number.isFinite(state.duration) && state.duration > 0);
+  }
+
+  /**
+   * 用宿主 HEAD 探测当前流是否还能由服务端提供，用于区分「后端/音源真失败」与
+   * 「设备不上报状态」。只信任明确的 HTTP 错误；超时、外链等无法下结论的情况返回 null，
+   * 交给调用方保留播放。
+   */
+  private async probeCurrentStreamPlayable(): Promise<boolean | null> {
+    const song = this.getCurrentSong();
+    if (!song || !song.url || song.type === 'radio') return null;
+    // 外链由设备直连，宿主的网络路径不代表设备侧可达性，不能据此判失败。
+    if (song.url.startsWith('http://') || song.url.startsWith('https://')) return null;
+    try {
+      await callHostAPI('HEAD', song.url, undefined, { timeoutMs: LANDING_STREAM_PROBE_TIMEOUT_MS });
+      return true;
+    } catch (e) {
+      const match = /Host API error (\d{3})/.exec(String(e));
+      if (!match) return null;
+      const status = Number(match[1]);
+      return status === 404 || status === 410 || status >= 500 ? false : null;
+    }
+  }
+
+  /**
+   * 整点报时是已知的主动打断：此时 idle 必须继续交给智能续播链判断，
+   * 不能被 #129 的状态盲区跳过，否则全零设备在报时后永远等不到续播。
+   * 窗口与配置条件与 tryHourlyResume 保持一致。
+   */
+  private async isHourlyResumeApplicable(): Promise<boolean> {
+    if (!this.playbackConfirmed || this.externalPlayback || this.isVoiceSuspended()) return false;
+    const song = this.getCurrentSong();
+    if (!song || song.type === 'radio') return false;
+    const now = new Date(this.stopPollFirstStopAtMs || Date.now());
+    const sinceHour = (now.getMinutes() * 60 + now.getSeconds()) * 1000 + now.getMilliseconds();
+    const hour = now.getTime() - sinceHour;
+    if (sinceHour >= HOURLY_RESUME_WINDOW_MS || hour === this.lastHourlyResumeHour) return false;
+    try {
+      return (await this.configManager.getConfig()).hourly_chime_resume_enabled === true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -2400,7 +2532,12 @@ export class PlaylistManager {
     if (Number.isFinite(state.status) && state.status >= 0 && state.hasPosition &&
       Number.isFinite(state.position) && state.position >= 0) {
       this.devicePositionObserved = true;
+      if (state.position > 0) {
+        this.streamPositionObserved = true;
+        this.streamEvidenceObserved = true;
+      }
     }
+    if (Number.isFinite(state.duration) && state.duration > 0) this.streamEvidenceObserved = true;
   }
 
   /** 同一条流的设备时长用于识别真实尾部，兼容比元数据略短或略长的音频。 */
@@ -2588,8 +2725,16 @@ export class PlaylistManager {
         const fresh = sampleAt > this.deadlineSampleAtMs;
         // 成功响应但整轮从未上报进度的设备，等待也拿不到结束证据；保留原时长兜底。
         // 查询失败、旧采样、外来媒体及曾有进度后暂时缺失，仍走有界重试（#495）。
-        useMetadataFallback = fresh && isDeviceStatusKnown(st.status) &&
-          st.hasPosition === false && !this.devicePositionObserved && streamMatch !== 'foreign';
+        // #129：OH2 这类整条流只回全零（位置 0、流长 0）的设备永远等不到结束证据，
+        // 超过盲区窗口后直接按元数据切歌，不再附加三十秒宽限。没有下发时间的流无法证明
+        // 已经播了多久，退回原宽限逻辑。
+        const streamAgeMs = this.streamStartedAtMs > 0 ? Date.now() - this.streamStartedAtMs : 0;
+        const longBlindStream = !this.streamPositionObserved && streamAgeMs >= STREAM_BLIND_METADATA_FALLBACK_MS;
+        const onlyZeroPosition = !st.hasPosition ||
+          (Number.isFinite(st.position) && st.position === 0);
+        useMetadataFallback = fresh && isDeviceStatusKnown(st.status) && streamMatch !== 'foreign' &&
+          ((st.hasPosition === false && !this.devicePositionObserved) ||
+            (longBlindStream && !(Number.isFinite(st.duration) && st.duration > 0) && onlyZeroPosition));
         const uncertainDuration = streamMatch === 'foreign' ||
           (streamMatch === 'unknown' && this.deadlineTailEvidence !== null);
         if (!uncertainDuration) this.deadlineTailEvidence = null;
@@ -2967,80 +3112,96 @@ export class PlaylistManager {
       const fresh = status >= 0 && sampleAt > this.stopPollLastSampleAt;
       if (fresh) {
         this.stopPollLastSampleAt = sampleAt;
+        const blindIdle = this.isBlindIdleState(st);
+        const hourlyArmed = blindIdle && await this.isHourlyResumeApplicable();
+        if (!isCurrent()) return;
+        const blind = blindIdle && !hourlyArmed;
         const hasPosition = st.hasPosition === true && Number.isFinite(position) && position >= 0;
         const stream = this.matchDeviceStream({ ...st, status: 1 });
-        if (hasPosition && stream !== 'foreign') {
-          this.stopPollMaxPosition = Math.max(this.stopPollMaxPosition, position);
-        }
-        if (status === 1 && stream !== 'foreign') {
-          this.playbackConfirmed = true;
+        if (blind) {
+          // #129：这条流从起播起就只有 idle + 全零详情（OH2 正常出声也如此）。
+          // status 证明不了外部停止；保留播放，交给元数据定时器继续。
+          if (!this.blindIdleNoticeLogged) {
+            songloft.log.info(`[PlaylistManager] External stop ignored: device reports no usable state (status=${status}, position=${position}s, duration=${st.duration}s), relying on metadata timer`);
+            this.blindIdleNoticeLogged = true;
+          }
           this.stopPollMisses = 0;
           this.stopPollLastPosition = -1;
           this.stopPollResumePosition = null;
-        } else if (isDeviceIdle(status) || (status === 1 && stream === 'foreign')) {
-          const advanced = hasPosition && stream !== 'foreign' && this.stopPollLastPosition >= 0 &&
-            position - this.stopPollLastPosition >= (verify ? TAIL_STALL_ADVANCE_MIN_SEC : EXTERNAL_STOP_POSITION_ADVANCE_MIN_SEC);
-          this.stopPollLastPosition = hasPosition && stream !== 'foreign' ? position : -1;
-          if (advanced) {
-            songloft.log.info(`[PlaylistManager] External stop ignored: status=${status} but position advanced to ${position}s, device still playing`);
+        } else {
+          if (hasPosition && stream !== 'foreign') {
+            this.stopPollMaxPosition = Math.max(this.stopPollMaxPosition, position);
+          }
+          if (status === 1 && stream !== 'foreign') {
             this.playbackConfirmed = true;
             this.stopPollMisses = 0;
+            this.stopPollLastPosition = -1;
             this.stopPollResumePosition = null;
+          } else if (isDeviceIdle(status) || (status === 1 && stream === 'foreign')) {
+            const advanced = hasPosition && stream !== 'foreign' && this.stopPollLastPosition >= 0 &&
+              position - this.stopPollLastPosition >= (verify ? TAIL_STALL_ADVANCE_MIN_SEC : EXTERNAL_STOP_POSITION_ADVANCE_MIN_SEC);
+            this.stopPollLastPosition = hasPosition && stream !== 'foreign' ? position : -1;
+            if (advanced) {
+              songloft.log.info(`[PlaylistManager] External stop ignored: status=${status} but position advanced to ${position}s, device still playing`);
+              this.playbackConfirmed = true;
+              this.stopPollMisses = 0;
+              this.stopPollResumePosition = null;
+            } else {
+              if (this.stopPollMisses === 0) {
+                this.stopPollFirstStopAtMs = Date.now();
+                // 报时通常在整点开始；无设备位置时以整点锚定，避免把探测延迟算成已听内容。
+                const now = new Date(Date.now());
+                const sinceHour = (now.getMinutes() * 60 + now.getSeconds()) + now.getMilliseconds() / 1000;
+                this.stopPollResumePosition = hasPosition && position > 0 && stream === 'ours'
+                  ? position * this.playbackSpeed + this.streamSeekOffsetSec
+                  : Math.max(this.streamSeekOffsetSec, this.getPosition() - (sinceHour < 90 ? sinceHour * this.playbackSpeed : 0));
+              }
+              this.stopPollMisses++;
+              if (this.stopPollMisses >= EXTERNAL_STOP_CONFIRM_COUNT) {
+                const song = this.getCurrentSong();
+                const nearStart = !!song && hasPosition && stream !== 'foreign' && position < LANDING_EARLY_STOP_SEC;
+                // 重载接管的流没有本次下发时间；缺失时间不能证明它刚起播。
+                const streamAge = this.streamStartedAtMs > 0 ? Date.now() - this.streamStartedAtMs : Infinity;
+                // 起播确认成功或已经离开起播墙钟窗口后，回零不能再证明歌曲不可播放。
+                if (nearStart && !this.playbackConfirmed && this.stopPollMaxPosition < LANDING_EARLY_STOP_SEC &&
+                  streamAge <= 60000) {
+                  songloft.log.warn(`[PlaylistManager] External stop early (status=${status}, position=${position}s), treating as landing failure`);
+                  this.markSongUnplayable(song!.id, 'early-stop');
+                  await this.handleLandingFailure({ tts: true });
+                  return;
+                }
+                const nearEnd = !!song && song.duration > 0 &&
+                  (this.stopPollMaxPosition * this.playbackSpeed + this.streamSeekOffsetSec >= song.duration - EXTERNAL_STOP_TAIL_GUARD_SEC ||
+                    this.getPosition() >= song.duration - EXTERNAL_STOP_TAIL_GUARD_SEC);
+                if (nearStart && this.stopPollMaxPosition >= LANDING_EARLY_STOP_SEC && nearEnd) {
+                  songloft.log.info(`[PlaylistManager] External stop at song tail, advancing as natural end (status=${status}, position=${position}s)`);
+                  this.stopCheckTimer();
+                  void this.onSongFinished().catch(e => {
+                    songloft.log.error('[PlaylistManager] onSongFinished error: ' + String(e));
+                  });
+                  return;
+                }
+                const recoveryIsCurrent = () => isCurrent() && cancelVersion === this.hourlyResumeCancelVersion;
+                if (await this.tryHourlyResume(this.stopPollResumePosition ?? this.getPosition(), recoveryIsCurrent)) {
+                  if (isCurrent() && cancelVersion !== this.hourlyResumeCancelVersion) this.scheduleStopPoll();
+                  return;
+                }
+                if (!isCurrent()) return;
+                if (stream === 'foreign') {
+                  // 不在整点恢复范围内的外来媒体交给原有语音交互处理，不抢占或推送下一首。
+                  this.stopPollMisses = 0;
+                } else {
+                  songloft.log.info(`[PlaylistManager] External stop confirmed (status=${status}, position=${position}s), cancelling auto-next`);
+                  await this.stop(false);
+                  return;
+                }
+              }
+            }
           } else {
-            if (this.stopPollMisses === 0) {
-              this.stopPollFirstStopAtMs = Date.now();
-              // 报时通常在整点开始；无设备位置时以整点锚定，避免把探测延迟算成已听内容。
-              const now = new Date(Date.now());
-              const sinceHour = (now.getMinutes() * 60 + now.getSeconds()) + now.getMilliseconds() / 1000;
-              this.stopPollResumePosition = hasPosition && position > 0 && stream === 'ours'
-                ? position * this.playbackSpeed + this.streamSeekOffsetSec
-                : Math.max(this.streamSeekOffsetSec, this.getPosition() - (sinceHour < 90 ? sinceHour * this.playbackSpeed : 0));
-            }
-            this.stopPollMisses++;
-            if (this.stopPollMisses >= EXTERNAL_STOP_CONFIRM_COUNT) {
-              const song = this.getCurrentSong();
-              const nearStart = !!song && hasPosition && stream !== 'foreign' && position < LANDING_EARLY_STOP_SEC;
-              // 重载接管的流没有本次下发时间；缺失时间不能证明它刚起播。
-              const streamAge = this.streamStartedAtMs > 0 ? Date.now() - this.streamStartedAtMs : Infinity;
-              // 起播确认成功或已经离开起播墙钟窗口后，回零不能再证明歌曲不可播放。
-              if (nearStart && !this.playbackConfirmed && this.stopPollMaxPosition < LANDING_EARLY_STOP_SEC &&
-                streamAge <= 60000) {
-                songloft.log.warn(`[PlaylistManager] External stop early (status=${status}, position=${position}s), treating as landing failure`);
-                this.markSongUnplayable(song!.id, 'early-stop');
-                await this.handleLandingFailure({ tts: true });
-                return;
-              }
-              const nearEnd = !!song && song.duration > 0 &&
-                (this.stopPollMaxPosition * this.playbackSpeed + this.streamSeekOffsetSec >= song.duration - EXTERNAL_STOP_TAIL_GUARD_SEC ||
-                  this.getPosition() >= song.duration - EXTERNAL_STOP_TAIL_GUARD_SEC);
-              if (nearStart && this.stopPollMaxPosition >= LANDING_EARLY_STOP_SEC && nearEnd) {
-                songloft.log.info(`[PlaylistManager] External stop at song tail, advancing as natural end (status=${status}, position=${position}s)`);
-                this.stopCheckTimer();
-                void this.onSongFinished().catch(e => {
-                  songloft.log.error('[PlaylistManager] onSongFinished error: ' + String(e));
-                });
-                return;
-              }
-              const recoveryIsCurrent = () => isCurrent() && cancelVersion === this.hourlyResumeCancelVersion;
-              if (await this.tryHourlyResume(this.stopPollResumePosition ?? this.getPosition(), recoveryIsCurrent)) {
-                if (isCurrent() && cancelVersion !== this.hourlyResumeCancelVersion) this.scheduleStopPoll();
-                return;
-              }
-              if (!isCurrent()) return;
-              if (stream === 'foreign') {
-                // 不在整点恢复范围内的外来媒体交给原有语音交互处理，不抢占或推送下一首。
-                this.stopPollMisses = 0;
-              } else {
-                songloft.log.info(`[PlaylistManager] External stop confirmed (status=${status}, position=${position}s), cancelling auto-next`);
-                await this.stop(false);
-                return;
-              }
-            }
+            this.stopPollMisses = 0;
+            this.stopPollLastPosition = -1;
+            this.stopPollResumePosition = null;
           }
-        } else {
-          this.stopPollMisses = 0;
-          this.stopPollLastPosition = -1;
-          this.stopPollResumePosition = null;
         }
       } else if (status < 0) {
         // 查询失败打断连续确认；缺失进度也不能作为回零或推进的证据。
@@ -3263,7 +3424,13 @@ export class PlaylistManager {
 
     this.state = 'playing';
     this.hardStopped = false;
-    if (Number.isFinite(devicePositionSec) && devicePositionSec >= 0) this.devicePositionObserved = true;
+    if (Number.isFinite(devicePositionSec) && devicePositionSec >= 0) {
+      this.devicePositionObserved = true;
+      if (devicePositionSec > 0) {
+        this.streamEvidenceObserved = true;
+        this.streamPositionObserved = true;
+      }
+    }
     if (song.duration > 0) {
       this.playStartTimeMs = Date.now() - (devicePositionSec / this.playbackSpeed) * 1000;
       const remaining = song.duration - devicePositionSec;

@@ -2338,6 +2338,187 @@ test('unavailable landing samples never skip or blacklist the playing song', asy
   });
 });
 
+const oh2BlindState = () => ({ status: 0, position: 0, duration: 0, hasPosition: true, sampledAt: Date.now() });
+
+test('issue 129: blind idle landing with a playable stream keeps the song playing', async () => {
+  await withClock(async h => {
+    const { manager, pushes } = player({
+      service: { getPlayState: async () => oh2BlindState() },
+    });
+    let failures = 0;
+    manager.handleLandingFailure = async () => { failures++; };
+    manager.streamStartedAtMs = Date.now();
+    manager.scheduleLandingVerify();
+    await h.advance(60000);
+    assert.equal(failures, 0);
+    assert.equal(pushes.length, 0);
+    assert.equal(manager.currentIndex, 0);
+    assert.equal(manager.state, 'playing');
+    assert.equal(manager.playbackConfirmed, true);
+    assert.equal(manager.isSongUnplayable(16), false);
+    assert.ok(h.hostCalls.some(([method, url]) => method === 'HEAD' && url === '/api/v1/songs/16/play'));
+    assert.ok(h.logs.some(line => line.includes('device reports no usable state')));
+    manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+test('issue 129: blind idle landing still advances when the stream probe returns a server error', async () => {
+  await withClock(async h => {
+    const { manager, pushes } = player({
+      service: { getPlayState: async () => oh2BlindState() },
+    });
+    http.callHostAPI = async method => {
+      if (method === 'HEAD') throw new Error('Host API error 502: bad gateway');
+      return {};
+    };
+    let failures = 0;
+    manager.handleLandingFailure = async () => { failures++; };
+    manager.streamStartedAtMs = Date.now();
+    manager.scheduleLandingVerify();
+    await h.advance(20000);
+    assert.equal(failures, 1);
+    assert.equal(pushes.length, 0);
+    assert.equal(manager.isSongUnplayable(16), true);
+    assert.ok(h.logs.some(line => line.includes('stream probe failed')));
+    manager.cleanup();
+  });
+});
+
+test('issue 129: blind idle landing with an inconclusive probe is kept after two bounded attempts', async () => {
+  await withClock(async h => {
+    const { manager } = player({
+      service: { getPlayState: async () => oh2BlindState() },
+    });
+    http.callHostAPI = async method => {
+      if (method === 'HEAD') throw new Error('timeout');
+      return {};
+    };
+    let failures = 0;
+    manager.handleLandingFailure = async () => { failures++; };
+    manager.streamStartedAtMs = Date.now();
+    manager.scheduleLandingVerify();
+    await h.advance(17000);
+    assert.equal(failures, 0);
+    assert.equal(manager.playbackConfirmed, false);
+    await h.advance(3000);
+    assert.equal(failures, 0);
+    assert.equal(manager.playbackConfirmed, true);
+    manager.cleanup();
+  });
+});
+
+test('issue 129: a blind all-zero device advances through two natural transitions without blacklisting', async () => {
+  await withClock(async h => {
+    const blindSongs = songs.map(song => ({ ...song, duration: 60 }));
+    const { manager, pushes, tts } = player({
+      mode: 'order',
+      initialSongs: blindSongs,
+      service: { getPlayState: async () => oh2BlindState() },
+    });
+    let failures = 0;
+    manager.handleLandingFailure = async () => { failures++; };
+    assert.equal(await manager.playCurrent(), true);
+    await h.advance(10000);
+    assert.equal(manager.currentIndex, 0, 'the first song must not be treated as unplayable');
+    assert.equal(manager.playbackConfirmed, true);
+    await h.advance(50000);
+    assert.equal(manager.currentIndex, 1, 'the metadata deadline must advance the queue');
+    assert.equal(pushes.length, 2);
+    assert.ok(pushes[1].includes('/songs/17/play'));
+    await h.advance(10000);
+    assert.equal(manager.currentIndex, 1, 'the second song must land through the same blind path');
+    assert.equal(manager.playbackConfirmed, true);
+    assert.equal(failures, 0);
+    assert.equal(manager.unplayableSongs.size, 0);
+    assert.deepEqual(tts, []);
+    assert.equal(manager.state, 'playing');
+    manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+test('issue 129: OH2 Music API playback with all-zero status lands and advances twice', async () => {
+  await withClock(async h => {
+    const blindSongs = songs.map(song => ({ ...song, duration: 60 }));
+    const client = new MinaHTTPClient({ user_id: 'test', device_id: 'test', services: {} });
+    const service = new MinaService({ getMinaClient: () => client }, {
+      getConfig: async () => ({ music_api_model_disabled: [] }),
+    });
+    service.getDeviceIdentity = async () => ({ hardware: 'OH2' });
+    const pushed = [];
+    client.doUbusRequest = async (_device, method, _path, message) => {
+      if (method === 'player_get_play_status') {
+        return { code: 0, data: { info: JSON.stringify({
+          status: 0, play_song_detail: { position: 0, duration: 0 },
+        }) } };
+      }
+      if (method === 'player_play_music') {
+        pushed.push(JSON.parse(message.music).payload.audio_items[0].stream.url);
+      } else if (method === 'player_play_url') {
+        pushed.push(message.url);
+      }
+      return { code: 0, data: { code: 0 } };
+    };
+    const { manager, tts } = player({
+      mode: 'order',
+      initialSongs: blindSongs,
+      service: {
+        playURL: (...args) => service.playURL(...args),
+        getPlayState: (...args) => service.getPlayState(...args),
+        getPlayerStatus: (...args) => service.getPlayerStatus(...args),
+      },
+    });
+    let failures = 0;
+    manager.handleLandingFailure = async () => { failures++; };
+    assert.equal(await manager.playCurrent(), true);
+    assert.equal(pushed.length, 1);
+    await h.advance(10000);
+    assert.equal(manager.currentIndex, 0, 'the first Music API track must not be skipped');
+    assert.equal(manager.playbackConfirmed, true);
+    await h.advance(50000);
+    assert.equal(manager.currentIndex, 1);
+    assert.equal(pushed.length, 2);
+    assert.ok(pushed[1].includes('/songs/17/play'));
+    await h.advance(10000);
+    assert.equal(manager.currentIndex, 1, 'the second Music API track must land through the blind path');
+    assert.equal(manager.playbackConfirmed, true);
+    assert.equal(failures, 0);
+    assert.equal(manager.unplayableSongs.size, 0);
+    assert.deepEqual(tts, []);
+    manager.cleanup();
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+test('issue 129: blind idle samples never confirm an external stop until the stream reports progress', async () => {
+  await withClock(async h => {
+    let state = { status: 0, position: 0, duration: 0, hasPosition: true };
+    const { manager } = player({ service: { getPlayState: async () => ({ ...state, sampledAt: Date.now() }) } });
+    manager.streamStartedAtMs = Date.now();
+    await manager.checkExternalStop();
+    await h.advance(20000);
+    await manager.checkExternalStop();
+    assert.equal(manager.state, 'playing');
+    assert.equal(manager.stopPollMisses, 0);
+    assert.ok(h.logs.some(line => line.includes('External stop ignored: device reports no usable state')));
+
+    // 本条流重新上报正进度后不再是状态盲区，之后的全零 idle 才按外部停止处理。
+    await h.advance(1);
+    state = { status: 1, position: 120, duration: 300, hasPosition: true };
+    await manager.checkExternalStop();
+    assert.equal(manager.streamEvidenceObserved, true);
+    assert.equal(manager.streamPositionObserved, true);
+    state = { status: 0, position: 0, duration: 0, hasPosition: true };
+    await h.advance(20000);
+    await manager.checkExternalStop();
+    await h.advance(20000);
+    await manager.checkExternalStop();
+    assert.equal(manager.state, 'stopped');
+    manager.cleanup();
+  });
+});
+
 test('early external stop records an expiring failure, not a permanent blacklist', async () => {
   await withClock(async h => {
     const { manager } = player({
@@ -2470,6 +2651,9 @@ for (const hasPosition of [false, true]) {
         });
         manager.playStartTimeMs = Date.now() - 130000;
         manager.streamStartedAtMs = Date.now() - 130000;
+        // 本条流此前正常上报过进度，当前的全零 idle 才能证明是外部停止（#129）。
+        manager.streamEvidenceObserved = true;
+        manager.streamPositionObserved = true;
         manager.playbackConfirmed = confirmed;
         await manager.checkExternalStop();
         await h.advance(20000);
@@ -2525,6 +2709,9 @@ test('cached idle samples and failed queries cannot confirm an external stop', a
     let state = { status: 0, position: 0, hasPosition: false, duration: 0, sampledAt: Date.now() };
     const { manager } = player({ service: { getPlayState: async () => state } });
     manager.playbackConfirmed = true;
+    // 外部停止的测试对象是「曾上报过进度、之后掉回全零」的真实停止，不是 #129 的状态盲区。
+    manager.streamEvidenceObserved = true;
+    manager.streamPositionObserved = true;
     await manager.checkExternalStop();
     await h.advance(1000);
     await manager.checkExternalStop();

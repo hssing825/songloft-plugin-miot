@@ -61,7 +61,7 @@ The Node 22 type-stripping flag is required for tests that import TS directly. B
 - **The same symptom can have different causes**: search all issues in both the parent and plugin
   repositories, then cross-check relevant bodies, comments, fix commits, and existing tests. Include
   parent (`songloft-org/songloft`) #171/#404/#408/#437/#449/#466/#481/#488/#490/#494/#495/#500/#503/#514/#516 and
-  local #54/#60/#61/#63/#87/#88/#95/#96/#98/#103/#114/#124 at minimum. A closed issue does not
+  local #54/#60/#61/#63/#87/#88/#95/#96/#98/#103/#114/#124/#129 at minimum. A closed issue does not
   rule out a regression. Distinguish code defects from unpublished fixes, outdated plugins, and old ffmpeg images.
 - **Local clock drift alone must not trigger a URL repush**: buffering can put the speaker behind;
   status 0/2 can also be wrong (songloft-org/songloft#449). Automatic recovery identifies replay using matching media,
@@ -146,6 +146,19 @@ The Node 22 type-stripping flag is required for tests that import TS directly. B
   timestamp so idle waiting is not counted as a long gap. Regress both deadline verification and the tail
   probe with "tail playing → idle → rewind five seconds later"; testing only two adjacent playing samples
   misses this path again.
+- **A status-blind device is not a playback failure (plugin #129)**: some devices, such as the OH2
+  with Music API/proxy playback, keep reporting `status=0/position=0/duration=0` while audio is audible.
+  Only an idle sample from a stream this process dispatched, with no positive position or stream duration
+  ever observed, enters the blind branch: landing verification first issues a HEAD probe against the
+  relative stream URL, and only an explicit 404/410/5xx advances the track. A retrievable stream, or an
+  inconclusive probe (timeout, external URL), is accepted as playing after at most two attempts and left
+  on the metadata timer. External-stop polling ignores these samples, except inside the hourly-chime
+  window, which stays with smart recovery. At the metadata deadline, a stream dispatched more than sixty
+  seconds ago that never reported a positive position and still has only zero media details advances on
+  its metadata duration without the extra thirty-second grace. Any positive position or duration exits
+  the blind branch immediately and restores the strict #124/#495 rules. Reloaded/adopted streams
+  (`streamStartedAtMs=0`) never enter this branch and keep the original idle judgment. Explicit
+  404/410/5xx still counts as a landing failure and advances.
 - **Reproduce interactions before fixing them**: new regression tests should fail before the fix and pass
   afterward. Assert the actual next-track URL push, queue index/state, failure markers, TTS, and remaining
   timers. Counting `onSongFinished` calls or inspecting screenshots alone does not establish queue continuity.
@@ -164,6 +177,7 @@ The Node 22 type-stripping flag is required for tests that import TS directly. B
 | Parent #408/#449, plugin #103 | Distinguish external stops from incorrect status reports using progress evidence; old tasks cannot push tracks after new controls or DLNA takeover | `player_failures`, `player_status` |
 | Parent #500/#503/#514 | Share queries per device, back off on failure, prioritize controls; expired handles and late results cannot clear replacement timers | `mina_status`, `player_transition`, host timer tests |
 | Plugin #124 recurrence / MIOT-013 | A tail idle sample must not drop the rewind baseline; an in-stream reset five seconds after `status=2` still advances immediately instead of waiting out the thirty-second grace | `player_transition` |
+| Plugin #129 | All-zero idle is neither a landing failure nor an external stop; explicit 404/410/5xx still advances; positive position/duration restores strict rules; hourly-chime resume still works | `player_failures`, `player_transition` |
 
 Keep this matrix synchronized with the Chinese version. Named plugin tests use `tests/<name>.test.mjs`.
 The parent server and plugin upgrade independently; acceptance records must include both versions and the commits actually installed.

@@ -1180,6 +1180,36 @@ test('an explicit zero position still counts as reported progress before it disa
   });
 });
 
+test('issue 129: a long blind idle stream advances at the metadata deadline without extra grace', async () => {
+  await withClock(async h => {
+    const p = player(async () => ({ status: 0, position: 0, duration: 0, hasPosition: true }));
+    p.manager.streamStartedAtMs = Date.now() - 90000;
+    p.manager.startCheckTimer(0.1);
+    await h.advance(99);
+    assert.equal(p.finished(), 0);
+    await h.advance(1);
+    assert.equal(p.finished(), 1);
+    assert.ok(h.logs.some(line => line.includes('device has no position, using metadata deadline')));
+    assert.equal(h.timers.size, 0);
+  });
+});
+
+test('issue 129: a freshly started blind idle stream keeps the grace period', async () => {
+  await withClock(async h => {
+    const p = player(async () => ({ status: 0, position: 0, duration: 0, hasPosition: true }));
+    p.manager.streamStartedAtMs = Date.now() - 10000;
+    p.manager.startCheckTimer(0.1);
+    await h.advance(100);
+    assert.equal(p.finished(), 0);
+    await h.advance(29999);
+    assert.equal(p.finished(), 0);
+    await h.advance(1);
+    assert.equal(p.finished(), 1);
+    assert.equal(h.logs.some(line => line.includes('device has no position, using metadata deadline')), false);
+    assert.equal(h.timers.size, 0);
+  });
+});
+
 for (const measured of [false, true]) {
   test(`${measured ? 'measured' : 'estimated'} calibration distinguishes temporary progress loss from a status-only device`, async () => {
     await withClock(async h => {
